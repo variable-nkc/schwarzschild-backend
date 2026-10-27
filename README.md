@@ -74,7 +74,7 @@ version field is not the payload contract version — see
 | `GET /health` | Liveness. Always 200 with `status: ok`, even with no DB configured. Exempt from the version gate (a liveness probe must not fail for want of a version declaration). |
 | `GET /dyad-status?iso1=&iso2=&as_of=` | One dyad at one as-of: the **full** rollup row as JSON, support fields included. `as_of` is optional; without it the dyad's latest as-of is used. 404 when the row does not exist. |
 | `GET /watchlist?as_of=&limit=&labels=` | Rollup rows at one as-of, full rows with support fields. `as_of` is optional (latest as-of when omitted). `limit` defaults to 100 (1–1000). `labels` repeats (`?labels=hot&labels=drifting`) or takes a comma-separated value; unknown labels are a 400. |
-| `GET /pcs-series?iso1=&iso2=` | The dyad's rollup history, oldest as-of first: per-set R7/R28 direction and std_resid, R7 share, temperature, label, and the stored anomaly series per as-of. See "PCS series" below. |
+| `GET /pcs-series?iso1=&iso2=` | The dyad's rollup history, oldest as-of first: per-set R7/R28 direction and std_resid, R7 share, temperature, label, the stored max exceedance, and the stored anomaly series per as-of. See "PCS series" below. |
 | `GET /census?as_of=` | Label counts at one as-of (latest as-of when omitted). An as-of with no rows returns all-zero counts, not an error. Counts are read-time aggregates over stored rows, not recomputed statistics. |
 | `GET /census-series` | Label counts per as-of, oldest first: the composition-over-time series. Same aggregate as `/census`, over all as-ofs. |
 
@@ -169,14 +169,18 @@ Contract changelog:
   strict/warn handling. Later additive change under the same
   version: `/pcs-series` gained the stored anomaly fields, and
   `/census` + `/census-series` were added (no existing field
-  changed, so no bump).
+  changed, so no bump). Later additive change under the same
+  version: `/pcs-series` gained the stored max exceedance
+  (`max_exc45`), for the Scan exceedance multiples (no existing
+  field changed, so no bump).
 
 ## PCS series: rollup history, not the panel
 
 `GET /pcs-series` serves the dyad's **rollup history**. Per as-of
 it carries what the rollup stores: per-set R7 direction, R7 share,
 and R7/R28 std_resid, plus temperature, label, R7 support
-(`v_7d`, `days_present_7`), and the stored anomaly series
+(`v_7d`, `days_present_7`), the stored max exceedance
+(`max_exc45`), and the stored anomaly series
 (`anomaly_composite`, `anomaly_composite_raw`, `anomaly_max3d`).
 It does **not** carry PCS panel fields (baseline mu, phi, Beta
 tails), because those live in the PCS panel parquet, not in the
