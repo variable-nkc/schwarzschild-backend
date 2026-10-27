@@ -25,7 +25,21 @@ Endpoints (all responses carry the provenance envelope; see
   value; unknown labels are a 400.
 - ``GET /pcs-series?iso1=&iso2=`` — the dyad's rollup history,
   oldest as-of first. This is a rollup-history series, not the PCS
-  panel series (panel-only fields are not in the rollup).
+  panel series (panel-only fields are not in the rollup). Each row
+  carries the stored anomaly series (``anomaly_composite``,
+  ``anomaly_composite_raw``, ``anomaly_max3d``) alongside the
+  per-set blocks.
+- ``GET /census?as_of=`` — label counts at one as-of (latest
+  as-of when omitted). An as-of with no rows returns all-zero
+  counts, not an error, mirroring the watchlist.
+- ``GET /census-series`` — label counts per as-of, oldest first:
+  the composition-over-time series.
+
+Census counts are read-time aggregates over stored rollup rows,
+not recomputed statistics: the labels are stored, the endpoints
+only count them. Additive changes (new fields, new endpoints)
+do not bump the payload contract version; a bump is reserved
+for breaking changes to existing fields or endpoints.
 
 Version checking: data endpoints accept an optional ``api_version``
 query parameter (the frontend's expected payload contract
@@ -311,6 +325,66 @@ def create_app() -> FastAPI:
             )
         return _ok(
             provenance, warnings, store.build_series(iso1, iso2, rows)
+        )
+
+    @app.get("/census", response_model=None)
+    def census(
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, path = _provenance()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        missing = _db_required(provenance, path)
+        if missing is not None:
+            return missing
+        try:
+            effective, counts, total = store.fetch_census(
+                path, as_of  # type: ignore[arg-type]
+            )
+        except sqlite3.Error as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup DB: {exc}",
+            )
+        return _ok(
+            provenance,
+            warnings,
+            {"as_of": effective, "total": total, "counts": counts},
+        )
+
+    @app.get("/census-series", response_model=None)
+    def census_series(
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, path = _provenance()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        missing = _db_required(provenance, path)
+        if missing is not None:
+            return missing
+        try:
+            rows = store.fetch_census_series(path)  # type: ignore[arg-type]
+        except sqlite3.Error as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup DB: {exc}",
+            )
+        return _ok(
+            provenance,
+            warnings,
+            {
+                "dates": [r["as_of"] for r in rows],
+                "rows": rows,
+            },
         )
 
     return app

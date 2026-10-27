@@ -42,6 +42,9 @@ COLUMNS = [
     "v_7d",
     "v_28d",
     "days_present_7",
+    "anomaly_composite",
+    "anomaly_composite_raw",
+    "anomaly_max3d",
     "gap_flag",
     "insufficient_sets",
     "low_volume",
@@ -63,7 +66,15 @@ for _set in SETS:
 # Fixture column types, mirroring the real rollup: without these, a
 # TEXT-only fixture would return numbers as strings and the tests
 # would be testing the fixture, not the app.
-REAL_COLUMNS = {"temperature", "v_7d", "v_28d", "days_present_7"} | {
+REAL_COLUMNS = {
+    "temperature",
+    "v_7d",
+    "v_28d",
+    "days_present_7",
+    "anomaly_composite",
+    "anomaly_composite_raw",
+    "anomaly_max3d",
+} | {
     f"{prefix}_{name}"
     for name in SETS
     for prefix in ("share_r7", "std_r7", "std_r28")
@@ -87,8 +98,9 @@ def _col_type(name: str) -> str:
     return "TEXT"
 
 
-def _row(iso1, iso2, as_of, label, temperature, flags):
+def _row(iso1, iso2, as_of, label, temperature, flags, anomaly=None):
     row = {c: None for c in COLUMNS}
+    composite, raw, max3d = anomaly or (1.5, 1.2, 2.0)
     row.update(
         {
             "iso1": iso1,
@@ -96,6 +108,9 @@ def _row(iso1, iso2, as_of, label, temperature, flags):
             "as_of": as_of,
             "temperature": temperature,
             "label": label,
+            "anomaly_composite": composite,
+            "anomaly_composite_raw": raw,
+            "anomaly_max3d": max3d,
             "flag_insufficient": 1 if "insufficient" in flags else 0,
             "flag_drifting": 1 if "drifting" in flags else 0,
             "flag_hot": 1 if "hot" in flags else 0,
@@ -146,8 +161,12 @@ def db_path(tmp_path: Path) -> Path:
         _row("USA", "MEX", "2026-09-30", "insufficient", 0.0, ("insufficient",)),
         # History for USA_IRN, oldest first in the fixture insert
         # order is deliberately not sorted, to test series ordering.
-        _row("USA", "IRN", "2026-09-29", "drifting", 0.4, ("drifting",)),
-        _row("USA", "IRN", "2026-09-28", "steady", 0.35, ()),
+        # Anomaly values differ per row so series tests can tell
+        # the rows apart.
+        _row("USA", "IRN", "2026-09-29", "drifting", 0.4, ("drifting",),
+             anomaly=(2.0, 1.8, 3.5)),
+        _row("USA", "IRN", "2026-09-28", "steady", 0.35, (),
+             anomaly=(0.5, 0.4, 1.0)),
     ]
     placeholders = ", ".join("?" * len(COLUMNS))
     for row in rows:
@@ -301,6 +320,61 @@ def test_pcs_series_not_found(client: TestClient) -> None:
     resp = client.get("/pcs-series", params={"iso1": "USA", "iso2": "XXX"})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "dyad_not_found"
+
+
+def test_pcs_series_carries_stored_anomaly_fields(
+    client: TestClient,
+) -> None:
+    resp = client.get("/pcs-series", params={"iso1": "USA", "iso2": "IRN"})
+    assert resp.status_code == 200
+    rows = resp.json()["data"]["rows"]
+    assert [r["anomaly_composite"] for r in rows] == [0.5, 2.0, 1.5]
+    assert [r["anomaly_composite_raw"] for r in rows] == [0.4, 1.8, 1.2]
+    assert [r["anomaly_max3d"] for r in rows] == [1.0, 3.5, 2.0]
+
+
+def test_census_at_one_as_of(client: TestClient) -> None:
+    resp = client.get("/census", params={"as_of": "2026-09-30"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["total"] == 5
+    assert data["counts"] == {
+        "insufficient": 1,
+        "hot": 1,
+        "drifting": 1,
+        "atypical": 1,
+        "steady": 1,
+    }
+
+
+def test_census_latest_as_of_when_omitted(client: TestClient) -> None:
+    resp = client.get("/census")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["as_of"] == "2026-09-30"
+
+
+def test_census_unknown_as_of_returns_zeros_not_error(
+    client: TestClient,
+) -> None:
+    resp = client.get("/census", params={"as_of": "2020-01-01"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 0
+    assert all(v == 0 for v in data["counts"].values())
+
+
+def test_census_series_over_time(client: TestClient) -> None:
+    resp = client.get("/census-series")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["dates"] == ["2026-09-28", "2026-09-29", "2026-09-30"]
+    rows = data["rows"]
+    assert rows[0]["as_of"] == "2026-09-28"
+    assert rows[0]["steady"] == 1 and rows[0]["total"] == 1
+    assert rows[1]["drifting"] == 1 and rows[1]["total"] == 1
+    assert rows[2]["total"] == 5
+    assert rows[2]["hot"] == 1 and rows[2]["insufficient"] == 1
 
 
 def test_version_strict_mismatch_fails(

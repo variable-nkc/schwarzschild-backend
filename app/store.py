@@ -138,11 +138,11 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
 
     This is a *rollup-history* series, not the PCS panel series: it
     carries what the rollup stores per as-of (per-set R7/R28
-    direction and std_resid, R7 share, temperature, label, and the
-    R7 support fields). The panel-only fields (baseline mu, phi,
-    Beta tails) are not in the rollup and are deliberately not
-    invented here — serving them is a later object (see README,
-    "Not built yet").
+    direction and std_resid, R7 share, temperature, label, the
+    R7 support fields, and the stored anomaly series). The
+    panel-only fields (baseline mu, phi, Beta tails) are not in
+    the rollup and are deliberately not invented here — serving
+    them is a later object (see README, "Not built yet").
     """
     series_rows = []
     for row in rows:
@@ -162,6 +162,9 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "label": row.get("label"),
                 "v_7d": row.get("v_7d"),
                 "days_present_7": row.get("days_present_7"),
+                "anomaly_composite": row.get("anomaly_composite"),
+                "anomaly_composite_raw": row.get("anomaly_composite_raw"),
+                "anomaly_max3d": row.get("anomaly_max3d"),
                 "per_set": per_set,
             }
         )
@@ -172,3 +175,63 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
         "dates": [r["as_of"] for r in series_rows],
         "rows": series_rows,
     }
+
+
+def fetch_census(
+    path: Path, as_of: str | None
+) -> tuple[str | None, dict[str, int], int]:
+    """Return (effective as_of, label counts, total) for one as-of.
+
+    Counts are a read-time aggregate over stored rollup rows, not a
+    recomputed statistic: the labels themselves are stored, this
+    only counts them. Labels with no rows at the as-of count zero.
+    With no as_of, the latest as-of in the DB is used. An as-of
+    with no rows returns all-zero counts, not an error, mirroring
+    the watchlist's empty-list-not-error behaviour.
+    """
+    effective = as_of if as_of is not None else latest_as_of(path)
+    counts = {label: 0 for label in LABEL_PRIORITY}
+    total = 0
+    if effective is None:
+        return None, counts, total
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT label, COUNT(*) FROM dyad_status_rollup "
+            "WHERE as_of = ? GROUP BY label",
+            (effective,),
+        ).fetchall()
+    for label, n in rows:
+        total += int(n)
+        if label in counts:
+            counts[label] = int(n)
+    return effective, counts, total
+
+
+def fetch_census_series(path: Path) -> list[dict]:
+    """Return one row per as-of: label counts plus total, oldest first.
+
+    This is the composition-over-time series the Scan composition
+    chart reads. It is an aggregate over stored rows (see
+    ``fetch_census``); the full-table GROUP BY uses the
+    (as_of, label) index and runs in ~2s against the 7M-row
+    September rollup on the dev VM.
+    """
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT as_of, label, COUNT(*) FROM dyad_status_rollup "
+            "GROUP BY as_of, label ORDER BY as_of"
+        ).fetchall()
+    by_as_of: dict[str, dict[str, int]] = {}
+    for as_of, label, n in rows:
+        entry = by_as_of.setdefault(
+            as_of, {label: 0 for label in LABEL_PRIORITY}
+        )
+        if label in entry:
+            entry[label] = int(n)
+    out = []
+    for as_of in sorted(by_as_of):
+        counts = by_as_of[as_of]
+        out.append(
+            {"as_of": as_of, "total": sum(counts.values()), **counts}
+        )
+    return out

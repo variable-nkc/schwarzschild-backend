@@ -74,7 +74,9 @@ version field is not the payload contract version — see
 | `GET /health` | Liveness. Always 200 with `status: ok`, even with no DB configured. Exempt from the version gate (a liveness probe must not fail for want of a version declaration). |
 | `GET /dyad-status?iso1=&iso2=&as_of=` | One dyad at one as-of: the **full** rollup row as JSON, support fields included. `as_of` is optional; without it the dyad's latest as-of is used. 404 when the row does not exist. |
 | `GET /watchlist?as_of=&limit=&labels=` | Rollup rows at one as-of, full rows with support fields. `as_of` is optional (latest as-of when omitted). `limit` defaults to 100 (1–1000). `labels` repeats (`?labels=hot&labels=drifting`) or takes a comma-separated value; unknown labels are a 400. |
-| `GET /pcs-series?iso1=&iso2=` | The dyad's rollup history, oldest as-of first: per-set R7/R28 direction and std_resid, R7 share, temperature, and label per as-of. See "PCS series" below. |
+| `GET /pcs-series?iso1=&iso2=` | The dyad's rollup history, oldest as-of first: per-set R7/R28 direction and std_resid, R7 share, temperature, label, and the stored anomaly series per as-of. See "PCS series" below. |
+| `GET /census?as_of=` | Label counts at one as-of (latest as-of when omitted). An as-of with no rows returns all-zero counts, not an error. Counts are read-time aggregates over stored rows, not recomputed statistics. |
+| `GET /census-series` | Label counts per as-of, oldest first: the composition-over-time series. Same aggregate as `/census`, over all as-ofs. |
 
 ### Watchlist ordering (v1 first pass)
 
@@ -139,9 +141,10 @@ be stamped. On errors, `data` is null and `error` is
 - Bump it **only** when a response shape changes in a breaking
   way: a field removed, renamed, or retyped.
 - Do **not** bump it for frontend-only changes, backend changes
-  that leave payload shapes untouched, bug fixes, or performance
-  work. Neither side has to be released in lockstep with the other
-  for ordinary changes.
+  that leave payload shapes untouched, bug fixes, performance
+  work, or **additive** changes: new fields on existing responses
+  and entirely new endpoints. Neither side has to be released in
+  lockstep with the other for ordinary changes.
 
 The frontend may send its expected version as the `api_version`
 query parameter on data endpoints. Behaviour is controlled by
@@ -163,23 +166,31 @@ Contract changelog:
 
 - `1` — initial v1 skeleton: `/health`, `/dyad-status`,
   `/watchlist`, `/pcs-series`, provenance envelope, version
-  strict/warn handling.
+  strict/warn handling. Later additive change under the same
+  version: `/pcs-series` gained the stored anomaly fields, and
+  `/census` + `/census-series` were added (no existing field
+  changed, so no bump).
 
 ## PCS series: rollup history, not the panel
 
 `GET /pcs-series` serves the dyad's **rollup history**. Per as-of
 it carries what the rollup stores: per-set R7 direction, R7 share,
-and R7/R28 std_resid, plus temperature, label, and R7 support
-(`v_7d`, `days_present_7`). It does **not** carry PCS panel fields
-(baseline mu, phi, Beta tails), because those live in the PCS
-panel parquet, not in the rollup — and v1 has no pandas
-dependency with which to read that parquet. Serving the true
-panel series (with mu/phi/tails) is a later object; see "Not built
-yet". Nothing here should be read as a panel series.
+and R7/R28 std_resid, plus temperature, label, R7 support
+(`v_7d`, `days_present_7`), and the stored anomaly series
+(`anomaly_composite`, `anomaly_composite_raw`, `anomaly_max3d`).
+It does **not** carry PCS panel fields (baseline mu, phi, Beta
+tails), because those live in the PCS panel parquet, not in the
+rollup — and v1 has no pandas dependency with which to read that
+parquet. Serving the true panel series (with mu/phi/tails) is a
+later object; see "Not built yet". Nothing here should be read
+as a panel series.
 
 One more rollup quirk, stated so it is not misread: the rollup
 stores an R7 share per set but no R28 share, so the series
-carries `share_r7` only. R28 is direction and std_resid only.
+carries `share_r7` only. R28 is direction and std_resid only
+from this endpoint; the frontend reconstructs the R28 share
+exactly from weekly R7 shares (see the frontend's
+`docs/DERIVED_FIGURES.md`), it is not served here.
 
 ## Tests
 
@@ -216,16 +227,20 @@ This is a skeleton, not the full 24-object contract in the
 analytics repo's `docs/API_PAYLOAD_LOG.md`. Not built in v1:
 
 - The remaining payload-log objects: panel-scope objects
-  (`scan.choropleth`, `scan.label_census`,
+  (`scan.choropleth`,
   `scan.temperature_direction_scatter`,
-  `scan.exceedance_small_multiples`), dyad-status objects
-  (`brief.figure`, `brief.export_preview`, `brief.what_changed`),
+  `scan.exceedance_small_multiples` — `scan.label_census` is
+  now served as `/census` + `/census-series`), dyad-status
+  objects (`brief.figure`, `brief.export_preview`,
+  `brief.what_changed`),
   PCS objects (`vet.pooled_evidence`, `vet.daily_vs_pooled`,
   `vet.set_directions`, `dig.pooled_leads`, `dig.triage_table`),
   exceedance/outlook objects (`vet.exceedance_trajectory`,
   `dig.forecast_ladder`), composition/anomaly objects
-  (`dig.state_trends`, `dig.anomaly_modulation`,
-  `dig.decomposition`, `dig.driver_summary`), code/event grain
+  (`dig.state_trends`,
+  `dig.decomposition`, `dig.driver_summary` — the anomaly
+  series behind `dig.anomaly_modulation` is now served as
+  `/pcs-series` fields, not as a separate object), code/event grain
   (`dig.code_table`, `dig.event_evidence` — the latter needs
   cursor pagination from day one), and context objects
   (`vet.peers`, `vet.prior_episodes`, `scan.divergence`,
