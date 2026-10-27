@@ -35,7 +35,17 @@ python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Point the app at a rollup database and run it with uvicorn:
+Point the app at a rollup database. The simplest way is a local
+`.env` file in this repo root (the app loads it at startup via
+`load_dotenv` in `app/config.py`; shell variables still win over
+`.env`, so an inline export overrides the file when you need it):
+
+```bash
+cp .env.example .env   # then edit ROLLUP_SQLITE to your rollup path
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Or, without a `.env` file, the old inline form still works:
 
 ```bash
 ROLLUP_SQLITE=/path/to/rollup_poc_base.sqlite \

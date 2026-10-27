@@ -5,7 +5,8 @@ test can point the app at a temporary fixture database by monkeypatching
 the environment, and so an operator can change the data source without
 re-importing the app.
 
-Environment variables
+Environment variables (shell, or a local ``.env`` file in the repo
+root — see the ``load_dotenv()`` call below; shell wins over ``.env``)
 ---------------------
 ROLLUP_SQLITE
     Full path to a ``rollup_poc_base.sqlite`` file (table
@@ -27,6 +28,16 @@ renamed, or retyped). See the README, "Versioning".
 
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# NOTE(capability): load_dotenv reads a local ``.env`` file (searched
+# from the working directory upward, so run uvicorn from the repo
+# root) into the process environment, without overriding variables
+# already set in the shell — shell values always win over ``.env``.
+# This is what lets an operator set ROLLUP_SQLITE once in ``.env``
+# instead of prefixing every uvicorn invocation. See ``.env.example``.
+load_dotenv()
 
 # NOTE(capability): os.getenv reads one environment variable, returning
 # the fallback when it is unset — the standard way to make a service
