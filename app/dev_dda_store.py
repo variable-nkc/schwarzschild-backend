@@ -14,10 +14,20 @@ Two deliberate dev decisions, both flagged for formalization:
    lets the frontend derive, as with the R28 reconstruction)
    is open until the spike measurements are in.
 2. "Mapped" is approximated as the union of the five action
-   sets. The PCS mapped denominator is the 318-code soc_long
-   set; the five sets cover those 318 codes (335 memberships
-   over 318 codes), so the union is the same denominator in
-   practice — formalization confirms it against soc_long.
+   sets — AND THAT APPROXIMATION IS WRONG, measured
+   2026-10-28: the five sets' union is 215 codes, NOT the
+   318-code soc_long set (335 memberships over 215 codes).
+   The dev endpoint's volume_mapped is therefore narrower
+   than PCS mapped volume — for USA_CAN's trailing 60d it
+   captures only 4,979 of 11,568 mapped counts (43%), the
+   rest sitting in tokens-but-unset codes like 043. The
+   natural fix candidate is mapped = the cameo_tokens.json
+   code list (318 codes, verified identical to soc_long's
+   code list) — but that change is Dan's call, not made
+   silently here; formalization decides. Until then, dev
+   daily shares are shares of union-volume, NOT shares of
+   PCS mapped volume, and must not be compared to R7
+   shares as if they were.
 
 A day with no mapped records yields a row with null shares
 (a gap, never a zero), mirroring the rollup's treatment of

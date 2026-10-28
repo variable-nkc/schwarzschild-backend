@@ -123,13 +123,49 @@ B-TREE FOR GROUP BY` — harmless at these set sizes
 ## Future simplex extension (prepared, not used)
 
 - Env: `DDA_SIMPLEXES_JSON` (config accessor present, no
-  endpoint reads it). Intended source: `cameo_tokens.json`.
-- That file is NOT present in the VM analytics checkout
-  (checked 2026-10-28: `data-refs/` holds only
-  `cameo_groups.json`); its location is Dan's to confirm
-  when the extension is picked up.
-- Pending: Dan's confirmation of the soc_long table as the
-  simplex source. Until then, no simplex-based composition
-  is served anywhere; round 1 uses membership-based set
-  shares only, and no schema decision about simplex fields
-  is made here.
+  endpoint reads simplex VALUES). Intended source:
+  `cameo_tokens.json`, now on the VM at
+  `workspace/user/files/cameo_tokens.json` (Dan-supplied,
+  2026-10-28; not a repo file).
+- **File verified (2026-10-28, measured, not assumed):**
+  a list of 318 entries whose code list is IDENTICAL to
+  soc_long's distinct codes (zero diff both ways). 286
+  entries carry complete p1..p5, all summing to 1 (zero
+  violations at 1e-6); 32 are all-null, none partial.
+  Values match soc_long probs EXACTLY (phase order
+  1..5 → p1..p5, tolerance 1e-9) for all 245 codes where
+  soc_long has non-null probs; 41 codes skipped because
+  soc_long itself has NULL probs there. Three all-null
+  codes ('070', '103', '200') sit inside action sets
+  anyway — membership without simplex placement.
+  Dan's confirmation of soc_long as the source is still
+  his to give; this is supporting evidence, not the
+  confirmation itself.
+- Until then, no simplex-based composition is served
+  anywhere; round 1 uses membership-based set shares only,
+  and no schema decision about simplex fields is made
+  here.
+
+## CORRECTION — dev mapped denominator (measured 2026-10-28)
+
+- The dev endpoints' "mapped" (union of the five action
+  sets) is 215 codes, NOT the 318-code soc_long set the
+  VET_DDA_NEEDS draft claims as the denominator. The
+  earlier notes-doc statement that the union "is the same
+  denominator in practice" was WRONG and is retracted.
+- Size of the gap, USA_CAN trailing 60d: union-volume
+  4,979 vs tokens-volume 11,568 (43%) — and ALL of that
+  window's volume is tokens codes (total = tokens =
+  11,568; no truly-unmapped codes in the window). The
+  missing 57% sits in high-volume tokens-but-unset codes
+  (e.g. 043: 1,402 window counts, in no action set).
+- Consequence: dev daily shares are shares of
+  union-volume, NOT shares of PCS mapped volume, and must
+  not be compared to R7 shares as if they were. The
+  natural fix candidate is mapped = the tokens code list
+  (318 = soc_long) — using the tokens file as a code
+  list, which is a different use from reading simplex
+  values and does not by itself start the simplex
+  extension. That switch is Dan's call; it is NOT made
+  silently here, and the dev code comment now states the
+  gap instead of the old claim.
