@@ -144,6 +144,50 @@ def test_codes_rows_and_provisional_baseline(dev_env):
     assert by_code["040"]["baseline_daily_mean"] == pytest.approx(2.0)
 
 
+def test_joint_values_gap_and_coverage(dev_env):
+    # 2026-09-28: 010 (4) + 020 (6) share simplex [0,0,0.2,0.3,0.5],
+    # 030 (10) has [0.5,0.3,0.2,0,0]. Delta-replaced (0 -> 0.005,
+    # rescaled by 1.01) then obs-weighted closed geometric mean
+    # (10 units each side): raw = [sqrt(.00495*.49505),
+    # sqrt(.00495*.29703), .19802, sqrt(.29703*.00495),
+    # sqrt(.49505*.00495)] = [.04950, .03835, .19802, .03835,
+    # .04950], closed by /0.37372 (hand-computed; an earlier
+    # version of this test had p2 wrong and the code was right).
+    r = dev_env.get("/dev/dda-joint", params={
+        "iso1": "AAA", "iso2": "BBB", "as_of": "2026-09-30", "window": 3})
+    assert r.status_code == 200, r.text
+    rows = r.json()["data"]["rows"]
+    assert [row["as_of"] for row in rows] == [
+        "2026-09-28", "2026-09-29", "2026-09-30"]
+    j28 = rows[0]["joint"]
+    assert j28 is not None
+    for phase, expected in (("p1", 0.1325), ("p2", 0.1026),
+                            ("p3", 0.5299), ("p4", 0.1026),
+                            ("p5", 0.1325)):
+        assert j28[phase] == pytest.approx(expected, abs=1e-3), j28
+    assert abs(sum(j28.values()) - 1.0) < 1e-9
+    assert rows[0]["joint_volume"] == 20
+    assert rows[0]["volume_total"] == 20
+    # Gap day: null joint, never carried forward.
+    assert rows[1]["joint"] is None
+    assert rows[1]["joint_volume"] == 0
+    assert rows[1]["volume_total"] == 0
+    # 2026-09-30: only 010 is joint-able (999 unmapped, 040
+    # null-simplex excluded) — joint IS 010's replaced simplex,
+    # and the coverage gap (9 of 18) stays visible.
+    j30 = rows[2]["joint"]
+    assert j30 is not None
+    assert j30["p1"] == pytest.approx(0.005 / 1.01, abs=1e-9)
+    assert j30["p5"] == pytest.approx(0.5 / 1.01, abs=1e-9)
+    assert rows[2]["joint_volume"] == 9
+    assert rows[2]["volume_total"] == 18
+    assert r.json()["provenance"]["message"].startswith("DEV ONLY")
+    # Unknown dyad: empty rows (same shape as daily/codes).
+    r2 = dev_env.get("/dev/dda-joint", params={
+        "iso1": "ZZZ", "iso2": "QQQ"})
+    assert r2.json()["data"]["rows"] == []
+
+
 def test_unknown_dyad_returns_empty_rows(dev_env):
     r = dev_env.get("/dev/dda-daily?iso1=ZZZ&iso2=YYY&window=3")
     assert r.status_code == 200

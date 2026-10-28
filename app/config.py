@@ -115,11 +115,13 @@ def dda_sets_path() -> Path | None:
 def dda_simplexes_path() -> Path | None:
     """Return the configured CAMEO-simplexes JSON path, or None.
 
-    Read as a CODE LIST ONLY by the dev endpoints (mapped set =
-    codes present in the file, verified = soc_long's 318). The
-    simplex p-values are NOT read by any endpoint — that
-    extension remains future, pending Dan's confirmation of
-    soc_long as the simplex source.
+    Read as a CODE LIST by the daily/codes dev endpoints (mapped
+    set = codes present in the file, verified = soc_long's 318)
+    AND for simplex VALUES by /dev/dda-joint (Dan, 2026-10-28 —
+    the simplex extension started in dev). The file's source is
+    cameo_tokens.json because Dan named it; soc_long as the
+    simplex source is still Dan's confirmation to give (tokens
+    carries values for 41 codes where soc_long is NULL).
     """
     raw = os.getenv("DDA_SIMPLEXES_JSON", "").strip()
     return Path(raw) if raw else None

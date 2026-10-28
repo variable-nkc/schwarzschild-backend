@@ -174,3 +174,41 @@ B-TREE FOR GROUP BY` — harmless at these set sizes
   the mapped list (Dan-supplied JSON vs soc_long table vs
   a backend-carried copy). Dev uses the JSON; the contract
   may choose otherwise.
+
+## /dev/dda-joint — daily joint compositions (Dan, 2026-10-28)
+
+- **This starts the simplex extension in dev** (Dan ordered
+  joint-composition panels for Vet A2): `/dev/dda-joint`
+  reads simplex VALUES via DDA_SIMPLEXES_JSON — the first
+  endpoint to do so. The daily/codes endpoints still use
+  that file as a code list only.
+- **Source is cameo_tokens.json because Dan named it —
+  NOT a soc_long confirmation** (still Dan's to give):
+  tokens carries values for 41 codes where soc_long itself
+  has NULL probs, so the two sources differ, and
+  confirming soc_long later would change the joint for
+  those 41 codes.
+- **Joint rule (the pipeline's composition rule at DDA
+  grain):** obs-weighted closed geometric mean of the
+  day's code simplexes — zeros become JOINT_DELTA = 5e-3,
+  each simplex rescaled to sum 1, joint_j ∝
+  exp(sum(w * ln p') / W), closed to sum 1. Codes with
+  all-null simplexes (32 in tokens, incl. 070/103/200
+  which sit in action sets) and truly unmapped codes
+  contribute nothing — they are NOT uniform-filled.
+- **Coverage stays visible:** each row carries
+  joint_volume (count mass over joint-able codes) and
+  volume_total (every code that day). Gap days and days
+  with no joint-able codes yield joint None — NO
+  carry-forward, a deliberate deviation from the rollup's
+  composition carry-forward, in Vet's gap discipline.
+- **Test pin:** fixture day 2026-09-28 joint ≈ [0.1325,
+  0.1026, 0.5299, 0.1026, 0.1325] (hand-computed; the first
+  draft of the test had p2 wrong and the code was right —
+  the corrected derivation is in the test comment).
+- **Formalization additions:** joint endpoint shape,
+  server-vs-client joint computation, and the pooled-joint
+  derivation (frontend recovers the trailing pooled joint
+  exactly from daily joints + joint_volumes in log domain
+  — same volume-weighting exactness as the R28
+  reconstruction) all need contract decisions.

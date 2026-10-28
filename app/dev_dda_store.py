@@ -20,19 +20,32 @@ Two deliberate dev decisions, both flagged for formalization:
    codes), which measured 2026-10-28 as capturing only 43%
    of USA_CAN's trailing-60d mapped volume (4,979 of 11,568);
    Dan ordered the switch to the tokens list the same day.
-   The tokens file is read here as a CODE LIST ONLY — its
-   p-values are not read by any endpoint (the simplex
-   extension remains future). The contract question that
-   remains open is the source of truth for the mapped list
-   (Dan-supplied JSON vs soc_long table vs a backend-carried
-   copy); the dev endpoints use the JSON via DDA_SIMPLEXES_JSON.
+   The contract question that remains open is the source of
+   truth for the mapped list (Dan-supplied JSON vs soc_long
+   table vs a backend-carried copy); the dev endpoints use
+   the JSON via DDA_SIMPLEXES_JSON.
+3. Simplex VALUES are read only by /dev/dda-joint (Dan,
+   2026-10-28 — this starts the simplex extension in dev).
+   The source is cameo_tokens.json because Dan named it;
+   that is NOT a confirmation of soc_long as the simplex
+   source (still Dan's to give): tokens carries values for
+   41 codes where soc_long itself has NULL probs, so the
+   two sources differ, and confirming soc_long later would
+   change the joint for those 41 codes. The joint rule is
+   the pipeline's composition rule at DDA grain (see
+   fetch_joint); server-vs-client computation is open at
+   formalization, same as point 1.
 
 A day with no mapped records yields a row with null shares
 (a gap, never a zero), mirroring the rollup's treatment of
-missing data.
+missing data. Joint rows likewise carry null joints on days
+with no joint-able codes — NO carry-forward (a deliberate
+deviation from the rollup's composition carry-forward, in
+Vet's gap discipline: a gap is shown, never fabricated).
 """
 
 import json
+import math
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -44,6 +57,17 @@ ACTION_SETS = (
     "deescalatory",
     "critical_incidents",
 )
+
+#: Simplex dimensions, p1..p5 in soc_long phase order
+#: (enduring peace, stable peace, unstable peace, crisis/threat,
+#: crisis/active). These are composition dimensions, not state
+#: assignments — a joint panel never says the dyad "is in" a phase.
+JOINT_PHASES = ("p1", "p2", "p3", "p4", "p5")
+
+#: Zero replacement for the geometric mean (the pipeline's
+#: established delta, 2026-10-02): zeros become DELTA and the
+#: simplex is rescaled to sum 1 before weighting.
+JOINT_DELTA = 5e-3
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -81,6 +105,69 @@ def load_mapped(path: Path) -> set[str]:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     return {str(e["code"]) for e in data if isinstance(e, dict) and "code" in e}
+
+
+def load_simplexes(path: Path) -> dict[str, tuple[float, ...] | None]:
+    """Per-code simplexes from a cameo_tokens.json file.
+
+    Returns {code: (p1..p5)} for codes with all five values
+    present, {code: None} for all-null codes (32 in tokens,
+    including 070/103/200 which sit in action sets) and for
+    partial entries (none in tokens today, guarded anyway).
+    A None simplex contributes nothing to a joint — it is not
+    uniform-filled, because the pipeline treats "no placement"
+    as excluded from state emission, not as non-diagnostic.
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    out: dict[str, tuple[float, ...] | None] = {}
+    for e in data:
+        if not isinstance(e, dict) or "code" not in e:
+            continue
+        vals = [e.get(p) for p in JOINT_PHASES]
+        if all(isinstance(v, (int, float)) for v in vals):
+            out[str(e["code"])] = tuple(float(v) for v in vals)  # type: ignore[arg-type]
+        else:
+            out[str(e["code"])] = None
+    return out
+
+
+def _joint_of_day(codes: list[tuple[str, int]],
+                  simplexes: dict[str, tuple[float, ...] | None]
+                  ) -> tuple[dict | None, int, int]:
+    """One day's joint composition + volumes.
+
+    Returns (joint, joint_volume, volume_total). joint maps
+    p1..p5, or None when no code that day has a usable simplex.
+    Rule (the pipeline's composition rule at DDA grain):
+    obs-weighted closed geometric mean of delta-replaced
+    simplexes — zeros become JOINT_DELTA, each simplex is
+    rescaled to sum 1, then joint_j ∝ exp(sum(w * ln p') / W)
+    over joint-able codes, closed to sum 1. joint_volume is
+    the count mass the joint actually covers (joint-able codes
+    only); volume_total counts every code that day, so the
+    coverage gap stays visible.
+    """
+    volume_total = sum(c for _, c in codes)
+    acc = [0.0] * len(JOINT_PHASES)
+    weight = 0.0
+    for code, count in codes:
+        simplex = simplexes.get(code)
+        if simplex is None:
+            continue
+        replaced = [JOINT_DELTA if v == 0 else v for v in simplex]
+        total = sum(replaced)
+        if total <= 0:
+            continue
+        for j, v in enumerate(replaced):
+            acc[j] += count * math.log(v / total)
+        weight += count
+    if weight <= 0:
+        return None, 0, volume_total
+    raw = [math.exp(a / weight) for a in acc]
+    total = sum(raw)
+    joint = {p: raw[j] / total for j, p in enumerate(JOINT_PHASES)}
+    return joint, int(weight), volume_total
 
 
 def _latest_as_of(conn: sqlite3.Connection, iso1: str, iso2: str) -> str | None:
@@ -140,6 +227,58 @@ def fetch_daily(
                 "volume_total": volume_total,
                 "volume_mapped": volume_mapped,
                 "per_set_share": per_set,
+            }
+        )
+        day += timedelta(days=1)
+    return (
+        {"dyad": f"{iso1}_{iso2}", "as_of": as_of, "window": window},
+        rows,
+    )
+
+
+def fetch_joint(
+    conn: sqlite3.Connection,
+    simplexes: dict[str, tuple[float, ...] | None],
+    iso1: str,
+    iso2: str,
+    as_of: str | None,
+    window: int,
+) -> tuple[dict, list[dict]]:
+    """Per-day joint compositions over the trailing window.
+
+    Returns (header, rows): rows are oldest first, one per
+    calendar day in the window, each {as_of, joint, joint_volume,
+    volume_total}. joint is None on gap days and on days whose
+    codes all lack usable simplexes — never carried forward.
+    """
+    if as_of is None:
+        as_of = _latest_as_of(conn, iso1, iso2)
+    if as_of is None:
+        return {"dyad": f"{iso1}_{iso2}", "as_of": None, "window": window}, []
+    end = date.fromisoformat(as_of)
+    start = end - timedelta(days=window - 1)
+    day_codes: dict[str, list[tuple[str, int]]] = {}
+    for r in conn.execute(
+        "SELECT obs_date, cameo_code, obs_count FROM dda"
+        " WHERE iso1 = ? AND iso2 = ? AND obs_date >= ? AND obs_date <= ?",
+        (iso1, iso2, start.isoformat(), end.isoformat()),
+    ):
+        day_codes.setdefault(r["obs_date"], []).append(
+            (r["cameo_code"], r["obs_count"])
+        )
+    rows = []
+    day = start
+    while day <= end:
+        key = day.isoformat()
+        joint, joint_volume, volume_total = _joint_of_day(
+            day_codes.get(key, []), simplexes
+        )
+        rows.append(
+            {
+                "as_of": key,
+                "joint": joint,
+                "joint_volume": joint_volume,
+                "volume_total": volume_total,
             }
         )
         day += timedelta(days=1)

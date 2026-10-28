@@ -534,6 +534,49 @@ def create_app() -> FastAPI:
             {**header, "sidecar": meta, "rows": rows},
         )
 
+    @app.get("/dev/dda-joint", response_model=None)
+    def dev_dda_joint(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        window: int = Query(default=60, ge=1, le=365),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # DEV ONLY: daily joint compositions (simplex extension,
+        # Dan 2026-10-28). Reads simplex VALUES via
+        # DDA_SIMPLEXES_JSON — the first endpoint to do so; the
+        # daily/codes endpoints use that file as a code list only.
+        provenance, dda, sets_p, simplexes_p = _dev_provenance()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        missing = _db_required(provenance, dda)
+        if missing is not None:
+            return missing
+        try:
+            conn = dev_dda_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                simplexes = dev_dda_store.load_simplexes(simplexes_p)  # type: ignore[arg-type]
+                meta = dev_dda_store.fetch_sidecar_meta(conn)
+                header, rows = dev_dda_store.fetch_joint(
+                    conn, simplexes, iso1, iso2, as_of, window
+                )
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(
+            provenance,
+            warnings,
+            {**header, "sidecar": meta, "rows": rows},
+        )
+
     return app
 
 
