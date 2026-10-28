@@ -44,6 +44,18 @@ for breaking changes to existing fields or endpoints.
 Version checking: data endpoints accept an optional ``api_version``
 query parameter (the frontend's expected payload contract
 version). See ``app/versioning.py`` for strict vs warn behaviour.
+
+Experimental ``/exp/`` endpoints (this branch only, never v1):
+``GET /exp/dda-records``, ``GET /exp/corpus``, ``GET /exp/rollup-at``,
+``GET /exp/rollup-dyad``, ``GET /exp/census-series``,
+``GET /exp/notable``, ``GET /exp/meta``. They use the same envelope
+shape but with ``api_version: "exp"``, are EXEMPT from the version
+gate (they take no ``api_version`` parameter and never 409), and
+every response carries the provenance message "EXPERIMENTAL — not
+part of the v1 contract; never promote." They serve raw rows only:
+no shares, joints, PCS, anomalies, or forecasts are computed
+server-side, and there is deliberately no ``/exp/pcs-slice``.
+See README, "Experimental /exp/ endpoints (never promote)".
 """
 
 import sqlite3
@@ -51,7 +63,7 @@ import sqlite3
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
-from . import config, store
+from . import config, exp_store, store
 from .config import API_VERSION, LABEL_PRIORITY
 from .models import ApiResponse, Provenance, VersionWarning
 from .versioning import check_version
@@ -172,6 +184,120 @@ def _ok(
         warnings=warnings,
         data=data,
     ).model_dump()
+
+
+#: Payload-contract marker for the experimental endpoints. It is
+#: deliberately not "1": an ``/exp/`` response must never be
+#: mistaken for a v1 response, and the ``/exp/`` routes are exempt
+#: from the v1 version gate (they take no ``api_version`` parameter).
+EXP_API_VERSION = "exp"
+
+#: Provenance message on EVERY ``/exp/`` response, success or
+#: error. The specific failure reason, when there is one, lives in
+#: ``error.message``; this message stays exactly this string so a
+#: client can always tell experimental data from v1 data.
+EXP_MESSAGE = "EXPERIMENTAL — not part of the v1 contract; never promote."
+
+
+def _exp_provenance() -> tuple[Provenance, object, object]:
+    """Load the ``/exp/`` provenance stamp and usable DB paths.
+
+    Returns (provenance, rollup_path_or_None, dda_path_or_None).
+    The stamp's build/vintage/computed_at come from the rollup when
+    one is configured and readable (the rollup is the stamped
+    product); the DDA sidecar carries no such stamp. ``source``
+    names the DBs actually available. A missing or unreadable DB is
+    reported by the caller as a 503, not raised here. The message is
+    always exactly ``EXP_MESSAGE``: the ``/exp/`` fence must survive
+    even the error responses.
+    """
+    rollup = config.rollup_path()
+    dda = config.dda_path()
+    usable_rollup: object = None
+    build_id = vintage = computed_at = None
+    if rollup is not None and rollup.exists():
+        try:
+            prov = store.fetch_provenance(rollup)  # type: ignore[arg-type]
+        except sqlite3.Error:
+            prov = None
+        # A readable-but-empty DB still counts as configured: the
+        # endpoints then return empty rows, as v1 does.
+        usable_rollup = rollup
+        if prov is not None:
+            build_id, vintage, computed_at = prov
+    usable_dda: object = None
+    if dda is not None and dda.exists():
+        usable_dda = dda
+    if usable_rollup is not None and usable_dda is not None:
+        source = "rollup_sqlite+dda_sidecar"
+    elif usable_rollup is not None:
+        source = "rollup_sqlite"
+    elif usable_dda is not None:
+        source = "dda_sidecar"
+    else:
+        source = None
+    return (
+        Provenance(
+            build_id=build_id,
+            vintage=vintage,
+            computed_at=computed_at,
+            source=source,
+            message=EXP_MESSAGE,
+        ),
+        usable_rollup,
+        usable_dda,
+    )
+
+
+def _exp_ok(provenance: Provenance, data: object) -> dict:
+    return ApiResponse(
+        api_version=EXP_API_VERSION,
+        provenance=provenance,
+        warnings=[],
+        data=data,
+    ).model_dump()
+
+
+def _exp_fail(
+    provenance: Provenance, status: int, code: str, message: str
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content=ApiResponse(
+            api_version=EXP_API_VERSION,
+            provenance=provenance,
+            warnings=[],
+            data=None,
+            error={"code": code, "message": message},
+        ).model_dump(),
+    )
+
+
+def _exp_db_required(
+    provenance: Provenance, path: object, env_var: str
+) -> JSONResponse | None:
+    """Return a 503 ``/exp/`` envelope when a DB is missing."""
+    if path is not None:
+        return None
+    return _exp_fail(
+        provenance,
+        503,
+        "db_not_configured",
+        f"No {env_var} DB configured or the file was not found: "
+        f"set {env_var} to the data file path.",
+    )
+
+
+def _exp_read(
+    provenance: Provenance, fn, *args
+) -> tuple[list[dict] | dict | None, JSONResponse | None]:
+    """Run an exp_store fetch, mapping sqlite errors to 503."""
+    try:
+        return fn(*args), None
+    except sqlite3.Error as exc:
+        return None, _exp_fail(
+            provenance, 503, "db_error", f"Could not read DB: {exc}"
+        )
 
 
 def _fail(
@@ -386,6 +512,139 @@ def create_app() -> FastAPI:
                 "rows": rows,
             },
         )
+
+    # ---------------------------------------------------------- /exp/
+    # Experimental raw-data endpoints. Same envelope shape as v1
+    # but api_version "exp", NO version gate, and the fence message
+    # on every response. Unknown dyads / empty as-ofs return empty
+    # row lists, not errors: raw delivery has no "not found" for a
+    # dyad that simply has no rows. No endpoint here computes
+    # anything: see app/exp_store.py.
+
+    @app.get("/exp/dda-records", response_model=None)
+    def exp_dda_records(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+    ) -> JSONResponse | dict:
+        provenance, _rollup, dda = _exp_provenance()
+        missing = _exp_db_required(provenance, dda, "DDA_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, exp_store.fetch_dda_records, dda, iso1, iso2
+        )
+        if error is not None:
+            return error
+        return _exp_ok(
+            provenance, {"iso1": iso1, "iso2": iso2, "rows": rows}
+        )
+
+    @app.get("/exp/corpus", response_model=None)
+    def exp_corpus(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+    ) -> JSONResponse | dict:
+        provenance, _rollup, dda = _exp_provenance()
+        missing = _exp_db_required(provenance, dda, "DDA_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, exp_store.fetch_corpus, dda, iso1, iso2
+        )
+        if error is not None:
+            return error
+        return _exp_ok(
+            provenance, {"iso1": iso1, "iso2": iso2, "rows": rows}
+        )
+
+    @app.get("/exp/rollup-at", response_model=None)
+    def exp_rollup_at(
+        as_of: str = Query(..., min_length=1),
+    ) -> JSONResponse | dict:
+        provenance, rollup, _dda = _exp_provenance()
+        missing = _exp_db_required(provenance, rollup, "ROLLUP_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, exp_store.fetch_rollup_at, rollup, as_of
+        )
+        if error is not None:
+            return error
+        return _exp_ok(provenance, {"as_of": as_of, "rows": rows})
+
+    @app.get("/exp/rollup-dyad", response_model=None)
+    def exp_rollup_dyad(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+    ) -> JSONResponse | dict:
+        provenance, rollup, _dda = _exp_provenance()
+        missing = _exp_db_required(provenance, rollup, "ROLLUP_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, exp_store.fetch_rollup_dyad, rollup, iso1, iso2
+        )
+        if error is not None:
+            return error
+        return _exp_ok(
+            provenance, {"iso1": iso1, "iso2": iso2, "rows": rows}
+        )
+
+    @app.get("/exp/census-series", response_model=None)
+    def exp_census_series() -> JSONResponse | dict:
+        provenance, rollup, _dda = _exp_provenance()
+        missing = _exp_db_required(provenance, rollup, "ROLLUP_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, store.fetch_census_series, rollup
+        )
+        if error is not None:
+            return error
+        return _exp_ok(
+            provenance,
+            {
+                "dates": [r["as_of"] for r in rows],  # type: ignore[union-attr]
+                "rows": rows,
+            },
+        )
+
+    @app.get("/exp/notable", response_model=None)
+    def exp_notable(
+        limit: int = Query(default=60, ge=1, le=1000),
+    ) -> JSONResponse | dict:
+        provenance, rollup, _dda = _exp_provenance()
+        missing = _exp_db_required(provenance, rollup, "ROLLUP_SQLITE")
+        if missing is not None:
+            return missing
+        rows, error = _exp_read(
+            provenance, exp_store.fetch_notable, rollup, limit
+        )
+        if error is not None:
+            return error
+        return _exp_ok(provenance, {"rows": rows})
+
+    @app.get("/exp/meta", response_model=None)
+    def exp_meta() -> JSONResponse | dict:
+        provenance, rollup, dda = _exp_provenance()
+        missing = _exp_db_required(provenance, rollup, "ROLLUP_SQLITE")
+        if missing is not None:
+            return missing
+        missing = _exp_db_required(provenance, dda, "DDA_SQLITE")
+        if missing is not None:
+            return missing
+        data, error = _exp_read(
+            provenance, exp_store.fetch_dda_stats, dda
+        )
+        if error is not None:
+            return error
+        rollup_meta, error = _exp_read(
+            provenance, exp_store.fetch_rollup_meta, rollup
+        )
+        if error is not None:
+            return error
+        data.update(rollup_meta)  # type: ignore[union-attr]
+        return _exp_ok(provenance, data)
 
     return app
 

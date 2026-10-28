@@ -226,7 +226,52 @@ max set, and label flags), census at one as-of / latest
 fallback / unknown-as-of zeros / series over time,
 provenance envelope presence (including on errors),
 version strict vs warn behaviour, and the no-DB 503 path. No test
-reads a real analytics product.
+reads a real analytics product. `tests/test_exp.py` covers the
+`/exp/` endpoints the same way: envelope shape and fence message,
+version-gate exemption, string codes and ordering, the corpus
+referent rule and exclusions, full rollup rows, census-series
+shape, notable ranking and limit, meta fields, the 503 paths, and
+the absence of `/exp/pcs-slice`.
+
+## Experimental /exp/ endpoints (never promote)
+
+This branch adds a fenced, experimental raw-data API for the
+viz-gallery catalogue and dan/poc dashboard pages, which are not
+deployed and are never promoted to v1. The workflow frontend must
+never call these endpoints; the v1 endpoints above are untouched.
+
+- Prefix: all endpoints are GET under `/exp/`.
+- Envelope: same `ApiResponse` shape as v1, but
+  `api_version: "exp"`, and every response (success or error)
+  carries provenance message "EXPERIMENTAL — not part of the v1
+  contract; never promote." The `/exp/` routes are EXEMPT from the
+  version gate: they take no `api_version` parameter and never 409.
+- Raw rows only: no shares, joints, PCS values, anomalies, or
+  forecasts are computed server-side. There is deliberately no
+  `/exp/pcs-slice` (the PCS panel is not served here). The clients
+  do all analytics locally, exactly as they do against local files.
+- Read-only: sqlite3 `mode=ro`, fresh connection per request, no DB
+  mutation, no new indexes, no new DB files.
+- Unknown dyads and empty as-ofs return empty row lists, not
+  errors. Rollup rows use the same shape as v1 rows (INTEGER flag
+  columns as JSON booleans, every stored column present, no field
+  trimming).
+- Required env vars: `ROLLUP_SQLITE` (rollup endpoints, same
+  discipline as v1) and `DDA_SQLITE` (DDA endpoints — must point
+  at a DDA sidecar file, table `dda`, not the mirror). A missing
+  or unfound DB returns a 503 envelope; `/exp/meta` requires both.
+
+Endpoints:
+
+| Endpoint | Data |
+| --- | --- |
+| `GET /exp/dda-records?iso1=&iso2=` | `{iso1, iso2, rows: [{obs_date, cameo_code, obs_count}]}` sorted by date then code. `cameo_code` is always a JSON string (`"010"`), never an int. |
+| `GET /exp/corpus?iso1=&iso2=` | Referent DDA rows for the target dyad, rows carrying dyad identity. Referent rule (mirrored from dan/poc `poc_app.get_corpus`): dyads sharing a country with the target, excluding the target dyad and its exact inverse. |
+| `GET /exp/rollup-at?as_of=` | `{as_of, rows: [full rollup rows]}` ordered by iso1, iso2. |
+| `GET /exp/rollup-dyad?iso1=&iso2=` | `{iso1, iso2, rows: [full rollup rows]}` oldest first. |
+| `GET /exp/census-series` | Same shape as v1 `/census-series`: `{dates, rows: [{as_of, total, insufficient, hot, drifting, atypical, steady}]}`. |
+| `GET /exp/notable?limit=60` | `{rows: [{iso1, iso2, peak_v_7d}]}` mirroring gallery `notable_dyads`: `MAX(v_7d)` per dyad, descending, capped at `limit`. |
+| `GET /exp/meta` | `{dda_min_date, dda_max_date, dda_rows, dda_dyads, rollup_min_asof, rollup_max_asof, rollup_dyads, rollup_build_id, rollup_vintage}`. |
 
 ## Project layout
 
@@ -235,10 +280,12 @@ app/
   main.py        FastAPI app factory + endpoints (HTTP only)
   models.py      Pydantic models, request/response boundary only
   store.py       SQLite access (plain sqlite3/dicts, no pandas)
+  exp_store.py   SQLite access for the /exp/ endpoints only
   config.py      Env vars, contract version, sets, label priority
   versioning.py  Payload-contract version check (strict/warn)
 tests/
   test_api.py    Pytest suite with a temporary SQLite fixture
+  test_exp.py    Pytest suite for the /exp/ endpoints
 requirements.txt
 ```
 

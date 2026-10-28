@@ -20,6 +20,15 @@ ROLLUP_SQLITE
 API_VERSION_MODE
     ``strict`` (default) or ``warn``. See ``app/versioning.py``.
 
+DDA_SQLITE
+    Full path to a DDA sidecar SQLite file (table ``dda``:
+    ``id, iso1, iso2, obs_date, cameo_code, obs_count``). Only the
+    experimental ``/exp/`` endpoints read it; v1 never touches it.
+    If unset, the ``/exp/`` DDA endpoints (and ``/exp/meta``)
+    return 503, exactly as the v1 data endpoints do without
+    ROLLUP_SQLITE. There is deliberately no hardcoded default.
+
+
 The payload contract version lives in ``API_VERSION`` below. It
 versions the *payload shape*, not code releases: it is bumped only
 when a response shape changes in a breaking way (a field removed,
@@ -85,6 +94,16 @@ LABEL_PRIORITY = (
 def rollup_path() -> Path | None:
     """Return the configured rollup path, or None when unset."""
     raw = os.getenv("ROLLUP_SQLITE", "").strip()
+    return Path(raw) if raw else None
+
+
+def dda_path() -> Path | None:
+    """Return the configured DDA sidecar path, or None when unset.
+
+    Same discipline as :func:`rollup_path`: read at request time,
+    empty counts as unset, no hardcoded default.
+    """
+    raw = os.getenv("DDA_SQLITE", "").strip()
     return Path(raw) if raw else None
 
 
