@@ -112,6 +112,20 @@ def dda_sets_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+def dda_simplexes_path() -> Path | None:
+    """Return the configured CAMEO-simplexes JSON path, or None.
+
+    FUTURE DEVELOPMENT ONLY — no endpoint reads this today.
+    Prepared for the simplex extension (cameo_tokens.json as
+    the intended source) so the env surface exists before it
+    is needed. The soc_long table is still to be confirmed as
+    the simplex source (Dan); until then, round 1 uses
+    membership-based set shares only.
+    """
+    raw = os.getenv("DDA_SIMPLEXES_JSON", "").strip()
+    return Path(raw) if raw else None
+
+
 def version_mode() -> str:
     """Return 'strict' or 'warn', defaulting to strict (fail closed).
 

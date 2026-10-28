@@ -119,3 +119,17 @@ B-TREE FOR GROUP BY` — harmless at these set sizes
   envelope carries two stamps.
 - Env names `DDA_SQLITE` / `DDA_SETS_JSON` are dev names;
   confirm or rename at contract time.
+
+## Future simplex extension (prepared, not used)
+
+- Env: `DDA_SIMPLEXES_JSON` (config accessor present, no
+  endpoint reads it). Intended source: `cameo_tokens.json`.
+- That file is NOT present in the VM analytics checkout
+  (checked 2026-10-28: `data-refs/` holds only
+  `cameo_groups.json`); its location is Dan's to confirm
+  when the extension is picked up.
+- Pending: Dan's confirmation of the soc_long table as the
+  simplex source. Until then, no simplex-based composition
+  is served anywhere; round 1 uses membership-based set
+  shares only, and no schema decision about simplex fields
+  is made here.
