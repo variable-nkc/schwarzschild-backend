@@ -43,6 +43,7 @@ COLUMNS = [
     "v_28d",
     "days_present_7",
     "max_exc45",
+    "max_exc45_set",
     "anomaly_composite",
     "anomaly_composite_raw",
     "anomaly_max3d",
@@ -73,6 +74,7 @@ REAL_COLUMNS = {
     "v_28d",
     "days_present_7",
     "max_exc45",
+    "max_exc45_set",
     "anomaly_composite",
     "anomaly_composite_raw",
     "anomaly_max3d",
@@ -101,7 +103,7 @@ def _col_type(name: str) -> str:
 
 
 def _row(iso1, iso2, as_of, label, temperature, flags, anomaly=None,
-         max_exc45=None):
+         max_exc45=None, max_exc45_set=None):
     row = {c: None for c in COLUMNS}
     composite, raw, max3d = anomaly or (1.5, 1.2, 2.0)
     row.update(
@@ -112,6 +114,7 @@ def _row(iso1, iso2, as_of, label, temperature, flags, anomaly=None,
             "temperature": temperature,
             "label": label,
             "max_exc45": max_exc45,
+            "max_exc45_set": max_exc45_set,
             "anomaly_composite": composite,
             "anomaly_composite_raw": raw,
             "anomaly_max3d": max3d,
@@ -162,16 +165,18 @@ def db_path(tmp_path: Path) -> Path:
         _row("USA", "FRA", "2026-09-30", "atypical", 0.2, ("atypical",)),
         _row("USA", "CAN", "2026-09-30", "drifting", 0.3, ("drifting",)),
         _row("USA", "IRN", "2026-09-30", "hot", 0.6, ("hot",),
-             max_exc45=0.80),
+             max_exc45=0.80, max_exc45_set="critical_incidents"),
         _row("USA", "MEX", "2026-09-30", "insufficient", 0.0, ("insufficient",)),
         # History for USA_IRN, oldest first in the fixture insert
         # order is deliberately not sorted, to test series ordering.
         # Anomaly values differ per row so series tests can tell
         # the rows apart.
         _row("USA", "IRN", "2026-09-29", "drifting", 0.4, ("drifting",),
-             anomaly=(2.0, 1.8, 3.5), max_exc45=0.45),
+             anomaly=(2.0, 1.8, 3.5), max_exc45=0.45,
+             max_exc45_set="instability"),
         _row("USA", "IRN", "2026-09-28", "steady", 0.35, (),
-             anomaly=(0.5, 0.4, 1.0), max_exc45=0.10),
+             anomaly=(0.5, 0.4, 1.0), max_exc45=0.10,
+             max_exc45_set="escalatory"),
     ]
     placeholders = ", ".join("?" * len(COLUMNS))
     for row in rows:
@@ -345,6 +350,16 @@ def test_pcs_series_carries_stored_max_exc45(
     assert resp.status_code == 200
     rows = resp.json()["data"]["rows"]
     assert [r["max_exc45"] for r in rows] == [0.10, 0.45, 0.80]
+
+
+def test_pcs_series_carries_stored_max_exc45_set(
+    client: TestClient,
+) -> None:
+    resp = client.get("/pcs-series", params={"iso1": "USA", "iso2": "IRN"})
+    assert resp.status_code == 200
+    rows = resp.json()["data"]["rows"]
+    assert [r["max_exc45_set"] for r in rows] == [
+        "escalatory", "instability", "critical_incidents"]
 
 
 def test_census_at_one_as_of(client: TestClient) -> None:

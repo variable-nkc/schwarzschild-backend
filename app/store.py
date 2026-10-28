@@ -140,7 +140,8 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
     carries what the rollup stores per as-of (per-set R7/R28
     direction and std_resid, R7 share, temperature, label, the
     R7 support fields, the stored anomaly series, and the
-    stored max exceedance (max_exc45). The
+    stored max exceedance (max_exc45) and the set attaining it
+    (max_exc45_set). The
     panel-only fields (baseline mu, phi, Beta tails) are not in
     the rollup and are deliberately not invented here — serving
     them is a later object (see README, "Not built yet").
@@ -164,6 +165,7 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "v_7d": row.get("v_7d"),
                 "days_present_7": row.get("days_present_7"),
                 "max_exc45": row.get("max_exc45"),
+                "max_exc45_set": row.get("max_exc45_set"),
                 "anomaly_composite": row.get("anomaly_composite"),
                 "anomaly_composite_raw": row.get("anomaly_composite_raw"),
                 "anomaly_max3d": row.get("anomaly_max3d"),

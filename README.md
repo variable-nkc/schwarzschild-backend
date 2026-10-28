@@ -172,6 +172,9 @@ Contract changelog:
   changed, so no bump). Later additive change under the same
   version: `/pcs-series` gained the stored max exceedance
   (`max_exc45`), for the Scan exceedance multiples (no existing
+  field changed, so no bump). Later additive change under the
+  same version: `/pcs-series` gained the set attaining the max
+  (`max_exc45_set`), for the Dig driving-set strip (no existing
   field changed, so no bump).
 
 ## PCS series: rollup history, not the panel
@@ -180,7 +183,8 @@ Contract changelog:
 it carries what the rollup stores: per-set R7 direction, R7 share,
 and R7/R28 std_resid, plus temperature, label, R7 support
 (`v_7d`, `days_present_7`), the stored max exceedance
-(`max_exc45`), and the stored anomaly series
+(`max_exc45`) and the set attaining it (`max_exc45_set`),
+and the stored anomaly series
 (`anomaly_composite`, `anomaly_composite_raw`, `anomaly_max3d`).
 It does **not** carry PCS panel fields (baseline mu, phi, Beta
 tails), because those live in the PCS panel parquet, not in the
