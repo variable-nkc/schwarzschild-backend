@@ -13,21 +13,19 @@ Two deliberate dev decisions, both flagged for formalization:
    contract decision (server computes vs serves raw counts and
    lets the frontend derive, as with the R28 reconstruction)
    is open until the spike measurements are in.
-2. "Mapped" is approximated as the union of the five action
-   sets — AND THAT APPROXIMATION IS WRONG, measured
-   2026-10-28: the five sets' union is 215 codes, NOT the
-   318-code soc_long set (335 memberships over 215 codes).
-   The dev endpoint's volume_mapped is therefore narrower
-   than PCS mapped volume — for USA_CAN's trailing 60d it
-   captures only 4,979 of 11,568 mapped counts (43%), the
-   rest sitting in tokens-but-unset codes like 043. The
-   natural fix candidate is mapped = the cameo_tokens.json
-   code list (318 codes, verified identical to soc_long's
-   code list) — but that change is Dan's call, not made
-   silently here; formalization decides. Until then, dev
-   daily shares are shares of union-volume, NOT shares of
-   PCS mapped volume, and must not be compared to R7
-   shares as if they were.
+2. "Mapped" is the cameo_tokens.json code list (318 codes,
+   verified identical to soc_long's distinct codes, 2026-10-28)
+   — NOT the union of the five action sets. History: the dev
+   endpoints first approximated mapped as the union (215
+   codes), which measured 2026-10-28 as capturing only 43%
+   of USA_CAN's trailing-60d mapped volume (4,979 of 11,568);
+   Dan ordered the switch to the tokens list the same day.
+   The tokens file is read here as a CODE LIST ONLY — its
+   p-values are not read by any endpoint (the simplex
+   extension remains future). The contract question that
+   remains open is the source of truth for the mapped list
+   (Dan-supplied JSON vs soc_long table vs a backend-carried
+   copy); the dev endpoints use the JSON via DDA_SIMPLEXES_JSON.
 
 A day with no mapped records yields a row with null shares
 (a gap, never a zero), mirroring the rollup's treatment of
@@ -74,6 +72,17 @@ def load_sets(path: Path) -> dict[str, set[str]]:
     return {s: {str(c) for c in data.get(s, [])} for s in ACTION_SETS}
 
 
+def load_mapped(path: Path) -> set[str]:
+    """Mapped code list from a cameo_tokens.json file.
+
+    CODE LIST ONLY — p-values are not read here. The list is
+    the 318-code soc_long set (verified identical, 2026-10-28).
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return {str(e["code"]) for e in data if isinstance(e, dict) and "code" in e}
+
+
 def _latest_as_of(conn: sqlite3.Connection, iso1: str, iso2: str) -> str | None:
     row = conn.execute(
         "SELECT MAX(obs_date) AS m FROM dda WHERE iso1 = ? AND iso2 = ?",
@@ -85,6 +94,7 @@ def _latest_as_of(conn: sqlite3.Connection, iso1: str, iso2: str) -> str | None:
 def fetch_daily(
     conn: sqlite3.Connection,
     sets: dict[str, set[str]],
+    mapped: set[str],
     iso1: str,
     iso2: str,
     as_of: str | None,
@@ -102,7 +112,6 @@ def fetch_daily(
         return {"dyad": f"{iso1}_{iso2}", "as_of": None, "window": window}, []
     end = date.fromisoformat(as_of)
     start = end - timedelta(days=window - 1)
-    mapped = set().union(*sets.values()) if sets else set()
     # Per-day, per-code counts in the window (dyad-scoped; the
     # sidecar index (iso1, iso2, obs_date) serves this directly).
     day_codes: dict[str, list[tuple[str, int]]] = {}
@@ -143,6 +152,7 @@ def fetch_daily(
 def fetch_codes(
     conn: sqlite3.Connection,
     sets: dict[str, set[str]],
+    mapped: set[str],
     iso1: str,
     iso2: str,
     as_of: str | None,
@@ -176,10 +186,7 @@ def fetch_codes(
         (iso1, iso2, start.isoformat(), end.isoformat()),
     ):
         win[r["cameo_code"]] = r["s"]
-    volume_mapped_at = sum(
-        c for code, c in at.items()
-        if code in (set().union(*sets.values()) if sets else set())
-    )
+    volume_mapped_at = sum(c for code, c in at.items() if code in mapped)
     rows = []
     for code in sorted(win, key=lambda c: (-at.get(c, 0), c)):
         code_sets = sorted(s for s, members in sets.items() if code in members)

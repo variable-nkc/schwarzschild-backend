@@ -146,26 +146,31 @@ B-TREE FOR GROUP BY` — harmless at these set sizes
   and no schema decision about simplex fields is made
   here.
 
-## CORRECTION — dev mapped denominator (measured 2026-10-28)
+## CORRECTION — dev mapped denominator (measured, then switched)
 
-- The dev endpoints' "mapped" (union of the five action
-  sets) is 215 codes, NOT the 318-code soc_long set the
-  VET_DDA_NEEDS draft claims as the denominator. The
-  earlier notes-doc statement that the union "is the same
-  denominator in practice" was WRONG and is retracted.
+- The dev endpoints FIRST approximated "mapped" as the
+  union of the five action sets: 215 codes, NOT the
+  318-code soc_long set the VET_DDA_NEEDS draft claims as
+  the denominator. The earlier notes-doc statement that the
+  union "is the same denominator in practice" was WRONG
+  and is retracted.
 - Size of the gap, USA_CAN trailing 60d: union-volume
   4,979 vs tokens-volume 11,568 (43%) — and ALL of that
   window's volume is tokens codes (total = tokens =
   11,568; no truly-unmapped codes in the window). The
   missing 57% sits in high-volume tokens-but-unset codes
   (e.g. 043: 1,402 window counts, in no action set).
-- Consequence: dev daily shares are shares of
-  union-volume, NOT shares of PCS mapped volume, and must
-  not be compared to R7 shares as if they were. The
-  natural fix candidate is mapped = the tokens code list
-  (318 = soc_long) — using the tokens file as a code
-  list, which is a different use from reading simplex
-  values and does not by itself start the simplex
-  extension. That switch is Dan's call; it is NOT made
-  silently here, and the dev code comment now states the
-  gap instead of the old claim.
+- **SWITCH MADE (Dan, 2026-10-28):** mapped = the
+  cameo_tokens.json code list (318 = soc_long), read via
+  the `DDA_SIMPLEXES_JSON` env var as a CODE LIST ONLY —
+  p-values are still not read by any endpoint, so this
+  does not by itself start the simplex extension. Dev
+  daily shares are now shares of PCS mapped volume (the
+  denominator now matches the draft; daily vs pooled grain
+  still differs, as it should). Pinned by tests: a
+  mapped-but-unset fixture code (040) counts toward
+  mapped volume and carries an empty sets list.
+- Contract question remaining: the SOURCE OF TRUTH for
+  the mapped list (Dan-supplied JSON vs soc_long table vs
+  a backend-carried copy). Dev uses the JSON; the contract
+  may choose otherwise.

@@ -402,17 +402,24 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     from . import dev_dda_store
 
-    def _dev_provenance() -> tuple[Provenance, object, object]:
-        """Sidecar + sets paths, or a 503-grade provenance.
+    def _dev_provenance() -> tuple[Provenance, object, object, object]:
+        """Sidecar + sets + simplexes paths, or a 503-grade provenance.
 
-        Returns (provenance, dda_path_or_None, sets_path_or_None).
+        Returns (provenance, dda_path_or_None, sets_path_or_None,
+        simplexes_path_or_None). The simplexes file is read as a
+        CODE LIST ONLY (mapped set); its p-values are not read.
         """
         dda = config.dda_path()
         sets_p = config.dda_sets_path()
-        if dda is None or sets_p is None:
+        simplexes_p = config.dda_simplexes_path()
+        if dda is None or sets_p is None or simplexes_p is None:
             missing = [
                 n
-                for n, p in (("DDA_SQLITE", dda), ("DDA_SETS_JSON", sets_p))
+                for n, p in (
+                    ("DDA_SQLITE", dda),
+                    ("DDA_SETS_JSON", sets_p),
+                    ("DDA_SIMPLEXES_JSON", simplexes_p),
+                )
                 if p is None
             ]
             return (
@@ -423,14 +430,17 @@ def create_app() -> FastAPI:
                 ),
                 None,
                 None,
+                None,
             )
-        if not dda.exists() or not sets_p.exists():
+        if not dda.exists() or not sets_p.exists() or not simplexes_p.exists():
             return (
                 Provenance(
                     source="dda_sidecar",
                     message="DEV ONLY — not part of the v1 contract. "
-                    "Configured DDA sidecar or sets file not found.",
+                    "Configured DDA sidecar, sets, or simplexes file "
+                    "not found.",
                 ),
+                None,
                 None,
                 None,
             )
@@ -441,6 +451,7 @@ def create_app() -> FastAPI:
             ),
             dda,
             sets_p,
+            simplexes_p,
         )
 
     @app.get("/dev/dda-daily", response_model=None)
@@ -454,7 +465,7 @@ def create_app() -> FastAPI:
             description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
-        provenance, dda, sets_p = _dev_provenance()
+        provenance, dda, sets_p, simplexes_p = _dev_provenance()
         warnings, error = _version_gate(provenance, api_version)
         if error is not None:
             return error
@@ -465,9 +476,10 @@ def create_app() -> FastAPI:
             conn = dev_dda_store.connect(dda)  # type: ignore[arg-type]
             try:
                 sets = dev_dda_store.load_sets(sets_p)  # type: ignore[arg-type]
+                mapped = dev_dda_store.load_mapped(simplexes_p)  # type: ignore[arg-type]
                 meta = dev_dda_store.fetch_sidecar_meta(conn)
                 header, rows = dev_dda_store.fetch_daily(
-                    conn, sets, iso1, iso2, as_of, window
+                    conn, sets, mapped, iso1, iso2, as_of, window
                 )
             finally:
                 conn.close()
@@ -493,7 +505,7 @@ def create_app() -> FastAPI:
             description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
-        provenance, dda, sets_p = _dev_provenance()
+        provenance, dda, sets_p, simplexes_p = _dev_provenance()
         warnings, error = _version_gate(provenance, api_version)
         if error is not None:
             return error
@@ -504,9 +516,10 @@ def create_app() -> FastAPI:
             conn = dev_dda_store.connect(dda)  # type: ignore[arg-type]
             try:
                 sets = dev_dda_store.load_sets(sets_p)  # type: ignore[arg-type]
+                mapped = dev_dda_store.load_mapped(simplexes_p)  # type: ignore[arg-type]
                 meta = dev_dda_store.fetch_sidecar_meta(conn)
                 header, rows = dev_dda_store.fetch_codes(
-                    conn, sets, iso1, iso2, as_of, window
+                    conn, sets, mapped, iso1, iso2, as_of, window
                 )
             finally:
                 conn.close()

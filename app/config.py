@@ -115,12 +115,11 @@ def dda_sets_path() -> Path | None:
 def dda_simplexes_path() -> Path | None:
     """Return the configured CAMEO-simplexes JSON path, or None.
 
-    FUTURE DEVELOPMENT ONLY — no endpoint reads this today.
-    Prepared for the simplex extension (cameo_tokens.json as
-    the intended source) so the env surface exists before it
-    is needed. The soc_long table is still to be confirmed as
-    the simplex source (Dan); until then, round 1 uses
-    membership-based set shares only.
+    Read as a CODE LIST ONLY by the dev endpoints (mapped set =
+    codes present in the file, verified = soc_long's 318). The
+    simplex p-values are NOT read by any endpoint — that
+    extension remains future, pending Dan's confirmation of
+    soc_long as the simplex source.
     """
     raw = os.getenv("DDA_SIMPLEXES_JSON", "").strip()
     return Path(raw) if raw else None
