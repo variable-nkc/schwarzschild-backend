@@ -113,9 +113,9 @@ change is a relabel, not a rebuild.
 {
   "api_version": "1",
   "provenance": {
-    "build_id": "f5b7de9",
+    "build_id": "a3d9769",
     "vintage": 366,
-    "computed_at": "2026-10-26T20:50:40+00:00",
+    "computed_at": "2026-10-27T10:32:25+00:00",
     "source": "rollup_sqlite",
     "message": null
   },
@@ -172,8 +172,12 @@ Contract changelog:
   changed, so no bump). Later additive change under the same
   version: `/pcs-series` gained the stored max exceedance
   (`max_exc45`), for the Scan exceedance multiples (no existing
-  field changed, so no bump). Later additive change under the
-  same version: `/pcs-series` gained the set attaining the max
+  field changed, so no bump). The multiples grid itself was
+  removed from the frontend 2026-10-28, superseded by per-item
+  previews; the field is still served and now feeds the Dig
+  exceedance pair chart and the Scan row bars. Later additive
+  change under the same version: `/pcs-series` gained the set
+  attaining the max
   (`max_exc45_set`), for the Dig driving-set strip (no existing
   field changed, so no bump). Later additive change under the
   same version: `/pcs-series` gained the four component label
@@ -184,8 +188,8 @@ Contract changelog:
 ## PCS series: rollup history, not the panel
 
 `GET /pcs-series` serves the dyad's **rollup history**. Per as-of
-it carries what the rollup stores: per-set R7 direction, R7 share,
-and R7/R28 std_resid, plus temperature, label, R7 support
+it carries what the rollup stores: per-set R7/R28 direction, R7
+share, and R7/R28 std_resid, plus temperature, label, R7 support
 (`v_7d`, `days_present_7`), the stored max exceedance
 (`max_exc45`) and the set attaining it (`max_exc45_set`),
 the four component label flags (`flag_insufficient`,
@@ -217,7 +221,10 @@ Tests build their own small SQLite fixture (a few
 They cover health (with and without a DB), dyad-status (found,
 latest-as-of fallback, not found), watchlist ordering / limit /
 label filter / unknown label, PCS-series ordering and per-set
-fields, provenance envelope presence (including on errors),
+fields (including the stored anomaly fields, max exceedance,
+max set, and label flags), census at one as-of / latest
+fallback / unknown-as-of zeros / series over time,
+provenance envelope presence (including on errors),
 version strict vs warn behaviour, and the no-DB 503 path. No test
 reads a real analytics product.
 
