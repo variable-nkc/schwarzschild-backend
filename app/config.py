@@ -88,6 +88,30 @@ def rollup_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+# --- DEV ONLY (dev/dda-sidecar branch; not part of the v1 contract) ---
+# The DDA sidecar is a second delivery data source: the DDA table
+# plus a serving index, built from the mirror by
+# tools/build_dda_sidecar.py. Both paths are read at request time,
+# like rollup_path above; unset means the dev endpoints 503.
+
+def dda_path() -> Path | None:
+    """Return the configured DDA sidecar path, or None when unset."""
+    raw = os.getenv("DDA_SQLITE", "").strip()
+    return Path(raw) if raw else None
+
+
+def dda_sets_path() -> Path | None:
+    """Return the configured CAMEO-sets JSON path, or None.
+
+    Dev shortcut: the sets live in the analytics repo
+    (data-refs/cameo_groups.json). Formalization decides where
+    the backend's copy lives; until then the dev endpoints read
+    the path from the environment and 503 without it.
+    """
+    raw = os.getenv("DDA_SETS_JSON", "").strip()
+    return Path(raw) if raw else None
+
+
 def version_mode() -> str:
     """Return 'strict' or 'warn', defaulting to strict (fail closed).
 

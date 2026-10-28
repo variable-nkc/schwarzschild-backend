@@ -387,6 +387,140 @@ def create_app() -> FastAPI:
             },
         )
 
+    # ------------------------------------------------------------------
+    # DEV ONLY — DDA sidecar endpoints (dev/dda-sidecar branch).
+    # NOT part of the v1 contract: do not build frontend features on
+    # these paths, do not document them as contract, and do not
+    # promote them without the formalization step (VET_DDA_NEEDS.md
+    # Part C). They exist to measure the spike shapes (Part D):
+    # query plans, latencies, payload sizes, index requirements.
+    # They read the DDA sidecar (DDA_SQLITE) plus the CAMEO sets
+    # (DDA_SETS_JSON); either unset means 503, same discipline as
+    # the v1 data endpoints. Daily set shares are computed here
+    # (see dev_dda_store) — a dev decision, flagged for
+    # formalization, not a v1 rule.
+    # ------------------------------------------------------------------
+    from . import dev_dda_store
+
+    def _dev_provenance() -> tuple[Provenance, object, object]:
+        """Sidecar + sets paths, or a 503-grade provenance.
+
+        Returns (provenance, dda_path_or_None, sets_path_or_None).
+        """
+        dda = config.dda_path()
+        sets_p = config.dda_sets_path()
+        if dda is None or sets_p is None:
+            missing = [
+                n
+                for n, p in (("DDA_SQLITE", dda), ("DDA_SETS_JSON", sets_p))
+                if p is None
+            ]
+            return (
+                Provenance(
+                    source="dda_sidecar",
+                    message="DEV ONLY — not part of the v1 contract. "
+                    f"Missing configuration: {', '.join(missing)}.",
+                ),
+                None,
+                None,
+            )
+        if not dda.exists() or not sets_p.exists():
+            return (
+                Provenance(
+                    source="dda_sidecar",
+                    message="DEV ONLY — not part of the v1 contract. "
+                    "Configured DDA sidecar or sets file not found.",
+                ),
+                None,
+                None,
+            )
+        return (
+            Provenance(
+                source="dda_sidecar",
+                message="DEV ONLY — not part of the v1 contract.",
+            ),
+            dda,
+            sets_p,
+        )
+
+    @app.get("/dev/dda-daily", response_model=None)
+    def dev_dda_daily(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        window: int = Query(default=60, ge=1, le=365),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, dda, sets_p = _dev_provenance()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        missing = _db_required(provenance, dda)
+        if missing is not None:
+            return missing
+        try:
+            conn = dev_dda_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                sets = dev_dda_store.load_sets(sets_p)  # type: ignore[arg-type]
+                meta = dev_dda_store.fetch_sidecar_meta(conn)
+                header, rows = dev_dda_store.fetch_daily(
+                    conn, sets, iso1, iso2, as_of, window
+                )
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(
+            provenance,
+            warnings,
+            {**header, "sidecar": meta, "rows": rows},
+        )
+
+    @app.get("/dev/dda-codes", response_model=None)
+    def dev_dda_codes(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        window: int = Query(default=60, ge=1, le=365),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, dda, sets_p = _dev_provenance()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        missing = _db_required(provenance, dda)
+        if missing is not None:
+            return missing
+        try:
+            conn = dev_dda_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                sets = dev_dda_store.load_sets(sets_p)  # type: ignore[arg-type]
+                meta = dev_dda_store.fetch_sidecar_meta(conn)
+                header, rows = dev_dda_store.fetch_codes(
+                    conn, sets, iso1, iso2, as_of, window
+                )
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(
+            provenance,
+            warnings,
+            {**header, "sidecar": meta, "rows": rows},
+        )
+
     return app
 
 
