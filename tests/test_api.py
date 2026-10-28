@@ -362,6 +362,21 @@ def test_pcs_series_carries_stored_max_exc45_set(
         "escalatory", "instability", "critical_incidents"]
 
 
+def test_pcs_series_carries_stored_label_flags(
+    client: TestClient,
+) -> None:
+    # Fixture flags come from _row's flags argument (see the
+    # watchlist/history rows above): 2026-09-28 steady (no flags),
+    # 2026-09-29 drifting, 2026-09-30 hot.
+    resp = client.get("/pcs-series", params={"iso1": "USA", "iso2": "IRN"})
+    assert resp.status_code == 200
+    rows = resp.json()["data"]["rows"]
+    assert [r["flag_hot"] for r in rows] == [0, 0, 1]
+    assert [r["flag_drifting"] for r in rows] == [0, 1, 0]
+    assert [r["flag_insufficient"] for r in rows] == [0, 0, 0]
+    assert [r["flag_atypical"] for r in rows] == [0, 0, 0]
+
+
 def test_census_at_one_as_of(client: TestClient) -> None:
     resp = client.get("/census", params={"as_of": "2026-09-30"})
     assert resp.status_code == 200
