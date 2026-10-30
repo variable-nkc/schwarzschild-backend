@@ -92,6 +92,12 @@ LC-02 STABILITY RULE (provisional dev-only, revised Dan
   in the last 7 as-ofs (including the effective as-of) on which
   that set's R7 direction equals its R7 direction at the
   effective as-of. Missing directions count as not agreeing.
+  Insufficient NEVER agrees (Dan 2026-10-30): a day counts
+  only when today's direction is a real direction
+  (up/down/steady) and the day's equals it; "insufficient"
+  on either side is a miss, even insufficient-vs-insufficient
+  — insufficient is absence of evidence, not a direction, so
+  a set insufficient all week scores 0/7, never 7/7.
   Dot per set, in set order: agree 7/7 -> green (held all
   week); 4-6/7 -> yellow (held most of the week); <=3/7 ->
   empty (not held). The R7-vs-R28 rule was retired because it
@@ -175,6 +181,12 @@ Source: `volume_regime` in the analytics worktree
    with no rollup row (or rollup unavailable) keeps the /dev/
    DDA pattern for LC-07 only; the other figures are empty
    for such a dyad in any case.
+4. LC-02 consistency, insufficient-never-agrees (Dan,
+   2026-10-30): "insufficient" is absence of evidence, not
+   a direction, so it never counts as agreement — even
+   insufficient-vs-insufficient. Previously a set
+   insufficient all week scored 7/7 green; it now scores
+   0/7 empty. No frontend change (it reads the counts).
 
 ## Still open / dev choices (not proposal text)
 

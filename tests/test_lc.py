@@ -438,3 +438,34 @@ def test_lc02_stability_short_history_flag(tmp_path, monkeypatch):
     assert st["inputs"]["window_days"] == 3
     assert st["inputs"]["short_history"] is True
     assert "Short history" in st["reason"]
+
+
+def test_lc02_stability_insufficient_never_agrees(tmp_path, monkeypatch):
+    # Dan 2026-10-30: "insufficient" is absence of evidence,
+    # not a direction, so it never counts as agreement — even
+    # insufficient-vs-insufficient. Today = 2026-09-30.
+    # Escalatory: today insufficient, 5 insufficient days in
+    # the window (incl. today) + 2 up days -> old code scored
+    # 5/7 yellow; correct score is 0/7 empty. Stability:
+    # today up, 5 insufficient days + 2 up days -> 2/7 empty
+    # (insufficient history days are misses). Other sets
+    # steady all week -> green, unaffected.
+    days = []
+    esc = ["up", "up"] + ["insufficient"] * 5
+    stab = ["insufficient"] * 5 + ["up", "up"]
+    for i, day in enumerate(range(24, 31)):
+        days.append((f"2026-09-{day}", {
+            "escalatory": esc[i], "stability": stab[i],
+            "instability": "steady", "deescalatory": "steady",
+            "critical_incidents": "steady"}))
+    db = _stability_rollup(tmp_path, {("KKK", "LLL"): days})
+    monkeypatch.setenv("ROLLUP_SQLITE", str(db))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    client = TestClient(create_app())
+    r = client.get("/lc/lc-02?iso1=KKK&iso2=LLL&as_of=2026-09-30")
+    assert r.status_code == 200
+    st = {row["row"]: row for row in r.json()["data"]["rows"]}["stability"]
+    assert st["dot_states"] == ["empty", "empty", "green", "green", "green"]
+    assert st["inputs"]["per_set"]["escalatory"]["today_dir"] == "insufficient"
+    assert st["inputs"]["per_set"]["escalatory"]["agree_days"] == 0
+    assert st["inputs"]["per_set"]["stability"]["agree_days"] == 2

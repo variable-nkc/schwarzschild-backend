@@ -40,7 +40,13 @@ LC-02 STABILITY RULE (provisional dev-only, revised Dan
 in the last STABILITY_WINDOW_DAYS as-ofs (including the
 effective as-of) on which that set's R7 direction equals its
 R7 direction at the effective as-of. Missing directions count
-as not agreeing. Dot per set, in SETS order:
+as not agreeing. Insufficient NEVER agrees (Dan 2026-10-30):
+a day counts only when today's direction is a real direction
+(up/down/steady) and the day's direction equals it;
+"insufficient" on either side is a miss, even
+insufficient-vs-insufficient — insufficient is absence of
+evidence, not a direction, so a set insufficient all week
+scores 0/7, never 7/7. Dot per set, in SETS order:
   agree == 7 -> "green" (held all week);
   4 <= agree <= 6 -> "yellow" (held most of the week);
   agree <= 3 -> "empty" (not held).
@@ -450,7 +456,9 @@ def fetch_lc02(
     # agreement over the last 7 as-ofs including the effective
     # as-of. R7-vs-R28 agreement was retired because it
     # conflated a genuine medium-horizon trend change with
-    # short-term noise (Dan feedback round 1).
+    # short-term noise (Dan feedback round 1). Insufficient
+    # never agrees (Dan 2026-10-30): "insufficient" on either
+    # side is a miss, even insufficient-vs-insufficient.
     hist = conn.execute(
         "SELECT as_of, "
         + ", ".join(f"dir_r7_{s}" for s in SETS)
@@ -466,7 +474,8 @@ def fetch_lc02(
         today_dir = row.get(f"dir_r7_{s}")
         agree_days = sum(
             1 for h in hist
-            if today_dir is not None and h[f"dir_r7_{s}"] == today_dir
+            if today_dir is not None and today_dir != "insufficient"
+            and h[f"dir_r7_{s}"] == today_dir
         )
         if agree_days >= STABILITY_GREEN_MIN:
             dot = "green"
