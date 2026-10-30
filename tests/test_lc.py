@@ -1,0 +1,347 @@
+"""Tests for the DEV Look-Closer endpoints (/lc/, Wave 1 only).
+
+Same discipline as test_dev_dda.py: every test builds its own
+small SQLite fixtures in a temporary directory and monkeypatches
+the environment per test. No test reads a real product. These
+tests cover the dev endpoints' arithmetic and gating only — they
+do not bless the shapes as contract (formalization does that).
+The LC-02/LC-05 scoring rules asserted here are the PROVISIONAL
+dev-only rules documented in app/lc_store.py and
+docs/LC_DEV_NOTES.md, not formalized methodology.
+"""
+
+import json
+import sqlite3
+from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+
+LC_MSG = "LC DEV ONLY — not part of the v1 contract."
+DATA_REASON = (
+    "mirror record/source line of effort, "
+    "not served by rollup or /lc/ endpoints"
+)
+SETS = (
+    "escalatory",
+    "stability",
+    "instability",
+    "deescalatory",
+    "critical_incidents",
+)
+
+# Per-set (r7_dir, std_r7, share_r7, r28_dir) at 2026-09-30 for AAA_BBB.
+# Agreement: esc agree, stab agree, inst disagree, deesc disagree,
+# crit agree -> stability dots 3. Top |std|: esc 6.25, inst 2.62,
+# deesc 0.84 -> the three LC-05 chips.
+PER_SET_0930 = {
+    "escalatory": ("up", 6.25, 0.14, "up"),
+    "stability": ("steady", -0.10, 0.21, "steady"),
+    "instability": ("up", 2.62, 0.24, "steady"),
+    "deescalatory": ("steady", -0.84, 0.11, "down"),
+    "critical_incidents": ("steady", -0.82, 0.05, "steady"),
+}
+
+
+def _rollup_columns() -> str:
+    cols = [
+        "iso1 TEXT", "iso2 TEXT", "as_of TEXT", "label TEXT",
+        "flag_insufficient INTEGER", "flag_hot INTEGER",
+        "flag_drifting INTEGER", "flag_atypical INTEGER",
+        "temperature REAL", "v_7d REAL", "days_present_7 REAL",
+        "insufficient_sets TEXT",
+        "build_id TEXT", "vintage INTEGER", "computed_at TEXT",
+    ]
+    for s in SETS:
+        cols += [
+            f"dir_r7_{s} TEXT", f"std_r7_{s} REAL", f"share_r7_{s} REAL",
+            f"dir_r28_{s} TEXT",
+        ]
+    return ", ".join(cols)
+
+
+def _rollup_row(day: date, label: str, drifting: int) -> tuple:
+    vals: list = [
+        "AAA", "BBB", day.isoformat(), label, 0, 0, drifting, 0,
+        0.3, 1128.0, 7.0, "", "test-build", 366, "2026-10-01",
+    ]
+    for s in SETS:
+        r7, std, share, r28 = PER_SET_0930[s]
+        vals += [r7, std, share, r28]
+    return tuple(vals)
+
+
+@pytest.fixture()
+def lc_env(tmp_path, monkeypatch):
+    """Tiny rollup (AAA_BBB, 2026-09-01..30) + tiny DDA sidecar.
+
+    Rollup labels: steady 09-01..09-28, drifting 09-29..09-30, so
+    LC-01 at 09-30 has delta "no change since yesterday" and at
+    09-29 has a label + flag change vs 09-28.
+    DDA dyads over [2026-06-11, 2026-09-30] (112 days, the full
+    LC-07 lead-in + typical window): CONST at 10/day mapped,
+    SPIKE at 10/day then 100/day over the last 7 days, SMALL
+    with only 10 days (ratio/median null).
+    """
+    db = tmp_path / "rollup.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(f"CREATE TABLE dyad_status_rollup ({_rollup_columns()})")
+    con.execute(
+        "CREATE INDEX idx_rollup_dyad ON dyad_status_rollup(iso1, iso2, as_of)"
+    )
+    day = date(2026, 9, 1)
+    rows = []
+    while day <= date(2026, 9, 30):
+        if day >= date(2026, 9, 29):
+            rows.append(_rollup_row(day, "drifting", 1))
+        else:
+            rows.append(_rollup_row(day, "steady", 0))
+        day += timedelta(days=1)
+    placeholders = ", ".join("?" * len(rows[0]))
+    con.executemany(
+        f"INSERT INTO dyad_status_rollup VALUES ({placeholders})", rows
+    )
+    con.commit()
+    con.close()
+
+    dda = tmp_path / "dda.sqlite"
+    con = sqlite3.connect(dda)
+    con.execute(
+        "CREATE TABLE dda (id INTEGER, iso1 TEXT, iso2 TEXT,"
+        " obs_date DATE, cameo_code TEXT, obs_count INTEGER)"
+    )
+    con.execute(
+        "CREATE INDEX idx_dda_dyad_date ON dda (iso1, iso2, obs_date)"
+    )
+    drows = []
+    rid = 1
+    day = date(2026, 6, 11)
+    while day <= date(2026, 9, 30):
+        drows.append((rid, "AAA", "BBB", day.isoformat(), "010", 10))
+        rid += 1
+        spike = 100 if day >= date(2026, 9, 24) else 10
+        drows.append((rid, "CCC", "DDD", day.isoformat(), "010", spike))
+        rid += 1
+        day += timedelta(days=1)
+    # Unmapped code on CONST's as-of: excluded from mapped volume.
+    drows.append((rid, "AAA", "BBB", "2026-09-30", "999", 5))
+    rid += 1
+    day = date(2026, 9, 21)
+    while day <= date(2026, 9, 30):
+        drows.append((rid, "EEE", "FFF", day.isoformat(), "010", 10))
+        rid += 1
+        day += timedelta(days=1)
+    con.executemany("INSERT INTO dda VALUES (?, ?, ?, ?, ?, ?)", drows)
+    con.execute("CREATE TABLE _sidecar_meta (key TEXT, value TEXT)")
+    con.executemany(
+        "INSERT INTO _sidecar_meta VALUES (?, ?)",
+        [("dda_rows", str(len(drows))), ("obs_max", "2026-09-30")],
+    )
+    con.commit()
+    con.close()
+    tokens = tmp_path / "cameo_tokens.json"
+    tokens.write_text(
+        json.dumps([{"code": "010", "p1": 0, "p2": 0, "p3": 0.2,
+                     "p4": 0.3, "p5": 0.5}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROLLUP_SQLITE", str(db))
+    monkeypatch.setenv("DDA_SQLITE", str(dda))
+    monkeypatch.setenv("DDA_SIMPLEXES_JSON", str(tokens))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    return TestClient(create_app())
+
+
+def test_lc01_history_delta_and_window_end(lc_env):
+    r = lc_env.get("/lc/lc-01?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provenance"]["message"] == LC_MSG
+    data = body["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["today_label"] == "drifting"
+    # 28 days ending at as-of (09-03..09-30), oldest first.
+    assert len(data["days"]) == 28
+    assert data["days"][0]["as_of"] == "2026-09-03"
+    assert data["days"][-1]["as_of"] == "2026-09-30"
+    assert data["days"][-1]["label"] == "drifting"
+    assert data["days"][-1]["flag_drifting"] is True
+    assert data["days"][-1]["flag_hot"] is False
+    assert "recent_typical" not in data
+    # 09-30 vs 09-29: same label, same flags.
+    assert data["delta"]["previous_as_of"] == "2026-09-29"
+    assert data["delta"]["label_change"] is None
+    assert data["delta"]["flag_changes"] == []
+    assert data["delta"]["text"] == "no change since yesterday"
+    # Window ends at as-of, never at the snapshot end.
+    r2 = lc_env.get("/lc/lc-01?iso1=AAA&iso2=BBB&as_of=2026-09-15")
+    d2 = r2.json()["data"]
+    assert d2["as_of"] == "2026-09-15"
+    assert d2["days"][-1]["as_of"] == "2026-09-15"
+    assert len(d2["days"]) == 15
+    # Label change day: 09-29 vs steady 09-28.
+    r3 = lc_env.get("/lc/lc-01?iso1=AAA&iso2=BBB&as_of=2026-09-29")
+    d3 = r3.json()["data"]
+    assert d3["delta"]["label_change"] == {
+        "from": "steady", "to": "drifting"}
+    assert d3["delta"]["flag_changes"] == [
+        {"flag": "flag_drifting", "from": False, "to": True}]
+    assert "steady -> drifting" in d3["delta"]["text"]
+
+
+def test_lc02_rows_provisional_dots_no_composite(lc_env):
+    r = lc_env.get("/lc/lc-02?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    assert r.json()["provenance"]["message"] == LC_MSG
+    data = r.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["provisional"] is True
+    rows = {row["row"]: row for row in data["rows"]}
+    assert set(rows) == {"evidence", "stability", "data"}
+    # Evidence: days 7 (>=4: +2, >=6: +1), v 1128 (>=30: +1),
+    # no insufficient sets (+1) = 5.
+    ev = rows["evidence"]
+    assert ev["dots"] == 5
+    assert ev["inputs"]["v_7d"] == 1128.0
+    assert ev["inputs"]["days_present_7"] == 7.0
+    assert ev["inputs"]["sets_with_sufficient_support"] == list(SETS)
+    assert ev["inputs"]["sets_with_insufficient_support"] == []
+    # Stability: 3 of 5 sets agree (esc, stab, crit).
+    st = rows["stability"]
+    assert st["dots"] == 3
+    assert st["inputs"]["agree_count"] == 3
+    assert st["inputs"]["compared_count"] == 5
+    assert st["inputs"]["per_set"]["instability"]["agree"] is False
+    # Data row: dots null, reason verbatim. No composite anywhere.
+    assert rows["data"]["dots"] is None
+    assert rows["data"]["reason"] == DATA_REASON
+    assert "composite" not in json.dumps(data).lower()
+
+
+def test_lc05_chips_rank_mixed_distance(lc_env):
+    r = lc_env.get("/lc/lc-05?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    assert r.json()["provenance"]["message"] == LC_MSG
+    chips = r.json()["data"]["chips"]
+    assert len(chips) == 3
+    # Ranked by |std|: esc 6.25, inst 2.62, deesc 0.84.
+    assert [c["set"] for c in chips] == [
+        "escalatory", "instability", "deescalatory"]
+    esc, inst, deesc = chips
+    assert esc["direction"] == "up"
+    assert esc["distance"] == "well above usual"
+    assert esc["std_resid"] == pytest.approx(6.25)
+    assert esc["share"] == pytest.approx(0.14)
+    assert esc["r7_dir"] == "up" and esc["r28_dir"] == "up"
+    # R28 steady disagrees with R7 up -> mixed over the month.
+    assert inst["direction"] == "mixed over the month"
+    assert inst["distance"] == "above usual"
+    # R28 down disagrees with R7 steady -> mixed; |std| < 1.
+    assert deesc["direction"] == "mixed over the month"
+    assert deesc["distance"] == "near usual"
+    assert deesc["r7_dir"] == "steady" and deesc["r28_dir"] == "down"
+
+
+def test_lc07_constant_series(lc_env):
+    r = lc_env.get("/lc/lc-07?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    assert r.json()["provenance"]["message"] == LC_MSG
+    data = r.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    # Pooled 7d mapped = 70; all 84 baseline windows are 70.
+    assert data["pooled_7d_volume"] == pytest.approx(70.0)
+    assert data["baseline_expectation"] == pytest.approx(70.0)
+    assert data["baseline_window_count"] == 84
+    assert data["volume_ratio"] == pytest.approx(1.0)
+    assert data["baseline_tail"] == pytest.approx(1.0)
+    # Internal consistency: pooled / baseline == ratio.
+    assert data["pooled_7d_volume"] / data["baseline_expectation"] \
+        == pytest.approx(data["volume_ratio"])
+    # Previous 14 days all ratio 1.0 -> median 1.0, 14 valid.
+    assert data["typical_valid_days"] == 14
+    assert data["recent_typical_median"] == pytest.approx(1.0)
+    assert len(data["recent_daily_ratios"]) == 14
+    assert all(row["volume_ratio"] == pytest.approx(1.0)
+               for row in data["recent_daily_ratios"])
+    assert "1.00 times the usual volume" in data["verdict"]
+    # Flat series: rare tail but ratio exactly 1.0 -> no caution.
+    assert data["caution"] is False
+    assert data["caution_text"] is None
+
+
+def test_lc07_spike_series(lc_env):
+    r = lc_env.get("/lc/lc-07?iso1=CCC&iso2=DDD&as_of=2026-09-30")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    # Last 7 days at 100: pooled 700, baseline windows all 70.
+    assert data["pooled_7d_volume"] == pytest.approx(700.0)
+    assert data["baseline_expectation"] == pytest.approx(70.0)
+    assert data["volume_ratio"] == pytest.approx(10.0)
+    assert data["baseline_tail"] == pytest.approx(0.0)
+    assert data["verdict"] == (
+        "10.00 times the usual volume; exceptionally loud")
+    assert data["caution"] is True
+    assert data["caution_text"] == (
+        "volume alone could explain part of today's move — "
+        "check the mix before the level.")
+    assert data["typical_valid_days"] == 14
+
+
+def test_lc07_short_history_nulls(lc_env):
+    r = lc_env.get("/lc/lc-07?iso1=EEE&iso2=FFF&as_of=2026-09-30")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    # 10 days cannot supply the 97-day lead-in: nulls, not zeros.
+    assert data["volume_ratio"] is None
+    assert data["baseline_tail"] is None
+    assert data["recent_typical_median"] is None
+    assert data["typical_valid_days"] == 0
+    assert data["verdict"] is None
+    assert data["caution"] is False
+
+
+def test_lc_unknown_dyad_returns_empty(lc_env):
+    for path, key in (("/lc/lc-01", "days"), ("/lc/lc-02", "rows"),
+                      ("/lc/lc-05", "chips")):
+        r = lc_env.get(f"{path}?iso1=XXX&iso2=YYY")
+        assert r.status_code == 200, path
+        data = r.json()["data"]
+        assert r.json()["provenance"]["message"] == LC_MSG
+        if key == "rows":
+            # Shape preserved with nulls; data row keeps its reason.
+            assert data["as_of"] is None
+            assert data["rows"][2]["reason"] == DATA_REASON
+            assert data["rows"][2]["dots"] is None
+        else:
+            assert data[key] == []
+            assert data["as_of"] is None
+    r = lc_env.get("/lc/lc-07?iso1=XXX&iso2=YYY")
+    assert r.status_code == 200
+    assert r.json()["data"]["volume_ratio"] is None
+    assert r.json()["data"]["as_of"] is None
+
+
+def test_lc_missing_config_503(tmp_path, monkeypatch):
+    monkeypatch.delenv("ROLLUP_SQLITE", raising=False)
+    monkeypatch.delenv("DDA_SQLITE", raising=False)
+    monkeypatch.delenv("DDA_SIMPLEXES_JSON", raising=False)
+    client = TestClient(create_app())
+    for path in ("/lc/lc-01", "/lc/lc-02", "/lc/lc-05", "/lc/lc-07"):
+        r = client.get(f"{path}?iso1=AAA&iso2=BBB")
+        assert r.status_code == 503, path
+        assert r.json()["error"]["code"] == "db_not_configured"
+        assert r.json()["provenance"]["message"] == LC_MSG
+
+
+def test_lc_version_gate_exempt(lc_env):
+    # api_version=99 would 409 on v1 and /dev/; /lc/ stays 200.
+    for path in ("/lc/lc-01", "/lc/lc-02", "/lc/lc-05", "/lc/lc-07"):
+        r = lc_env.get(
+            f"{path}?iso1=AAA&iso2=BBB&as_of=2026-09-30&api_version=99")
+        assert r.status_code == 200, path
+    # Sanity: the gate still fires on a v1 endpoint in this env.
+    r = lc_env.get("/dyad-status?iso1=AAA&iso2=BBB&api_version=99")
+    assert r.status_code == 409
