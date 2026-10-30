@@ -112,6 +112,14 @@ omitted as-of resolves to the dyad's latest DDA obs_date.
 An unknown dyad with no as-of yields as_of null and null
 values; with an as-of given, the requested as-of is echoed
 with null values (same echo discipline as /dev/dda-daily).
+As-of resolution (LC-07, Dan 2026-10-30 flag 3 — RESOLVED):
+the effective as-of is shared across all four figures. The
+/lc/lc-07 route resolves it from the rollup when the dyad has
+a rollup row at or before the requested as-of (see
+resolve_rollup_as_of); only when the dyad has no rollup row,
+or the rollup is unavailable, does LC-07 fall back to the
+/dev/ DDA pattern above. The payload's "as_of" is always the
+effective as-of.
 """
 
 import sqlite3
@@ -182,6 +190,17 @@ def _parse_insufficient(raw: object) -> list[str]:
     if not text:
         return []
     return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def resolve_rollup_as_of(
+    conn: sqlite3.Connection, iso1: str, iso2: str, as_of: str | None
+) -> str | None:
+    """Dyad's latest as-of <= requested (or latest overall).
+
+    Public wrapper so the /lc/lc-07 route can share the same
+    effective-as-of rule as the rollup endpoints.
+    """
+    return _resolve_rollup_as_of(conn, iso1, iso2, as_of)
 
 
 def _resolve_rollup_as_of(

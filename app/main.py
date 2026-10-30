@@ -591,14 +591,20 @@ def create_app() -> FastAPI:
     # on these paths as contract, and do not promote them without
     # the formalization step. Every envelope's provenance message
     # is exactly "LC DEV ONLY — not part of the v1 contract."
-    # Version-gate exemption: /lc/ endpoints accept an optional
-    # api_version parameter but NEVER fail on it (no 409) — they
-    # are exempt from the strict version gate by brief. NOTE: this
-    # is a deliberate deviation from the /dev/ pattern, which
-    # DOES apply the gate (pinned by
-    # tests/test_dev_dda.py::test_dev_version_gate_strict) despite
-    # the brief's premise that /dev/ is exempt; flagged for
-    # confirmation in docs/LC_DEV_NOTES.md.
+    # Version gate: /lc/ endpoints apply the SAME gate as /dev/
+    # (Dan, 2026-10-30, flag 1: flip to match /dev/ for now — the
+    # original brief's premise that /dev/ is exempt was wrong, and
+    # versioning questions are deferred until the fast
+    # feedback/dev cycle ends). A mismatched api_version 409s in
+    # strict mode and warns in warn mode, exactly as on /dev/.
+    # LC-07 effective as-of (Dan, 2026-10-30, flag 3): when the
+    # dyad has a rollup row at or before the requested as-of, the
+    # rollup's latest such as-of is the effective as-of for LC-07
+    # too, so all four figures describe the same day. When the
+    # dyad has no rollup row (DDA-only dev fixture, or rollup
+    # unavailable), LC-07 falls back to the /dev/ DDA pattern
+    # (requested verbatim, or latest DDA date when omitted) —
+    # the other figures are empty for such a dyad in any case.
     # LC-01/02/05 read the rollup (ROLLUP_SQLITE); LC-07 reads
     # the DDA sidecar (DDA_SQLITE) plus the mapped code list
     # (DDA_SIMPLEXES_JSON). Missing config means 503, same
@@ -706,10 +712,13 @@ def create_app() -> FastAPI:
         as_of: str | None = Query(default=None),
         api_version: str | None = Query(
             default=None,
-            description="Ignored on /lc/ endpoints (version-gate exempt).",
+            description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
         provenance, path = _lc_rollup()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
         if path is None:
             return _lc_missing(
                 provenance,
@@ -724,10 +733,10 @@ def create_app() -> FastAPI:
                 conn.close()
         except sqlite3.Error as exc:
             return _fail(
-                provenance, [], 503, "db_error",
+                provenance, warnings, 503, "db_error",
                 f"Could not read rollup DB: {exc}",
             )
-        return _ok(provenance, [], data)
+        return _ok(provenance, warnings, data)
 
     @app.get("/lc/lc-02", response_model=None)
     def lc_02(
@@ -736,10 +745,13 @@ def create_app() -> FastAPI:
         as_of: str | None = Query(default=None),
         api_version: str | None = Query(
             default=None,
-            description="Ignored on /lc/ endpoints (version-gate exempt).",
+            description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
         provenance, path = _lc_rollup()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
         if path is None:
             return _lc_missing(
                 provenance,
@@ -754,10 +766,10 @@ def create_app() -> FastAPI:
                 conn.close()
         except sqlite3.Error as exc:
             return _fail(
-                provenance, [], 503, "db_error",
+                provenance, warnings, 503, "db_error",
                 f"Could not read rollup DB: {exc}",
             )
-        return _ok(provenance, [], data)
+        return _ok(provenance, warnings, data)
 
     @app.get("/lc/lc-05", response_model=None)
     def lc_05(
@@ -766,10 +778,13 @@ def create_app() -> FastAPI:
         as_of: str | None = Query(default=None),
         api_version: str | None = Query(
             default=None,
-            description="Ignored on /lc/ endpoints (version-gate exempt).",
+            description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
         provenance, path = _lc_rollup()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
         if path is None:
             return _lc_missing(
                 provenance,
@@ -784,10 +799,10 @@ def create_app() -> FastAPI:
                 conn.close()
         except sqlite3.Error as exc:
             return _fail(
-                provenance, [], 503, "db_error",
+                provenance, warnings, 503, "db_error",
                 f"Could not read rollup DB: {exc}",
             )
-        return _ok(provenance, [], data)
+        return _ok(provenance, warnings, data)
 
     @app.get("/lc/lc-07", response_model=None)
     def lc_07(
@@ -796,31 +811,53 @@ def create_app() -> FastAPI:
         as_of: str | None = Query(default=None),
         api_version: str | None = Query(
             default=None,
-            description="Ignored on /lc/ endpoints (version-gate exempt).",
+            description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
         provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
         if dda is None or simplexes_p is None:
             return _lc_missing(
                 provenance,
                 "LC DEV ONLY — no usable DDA sidecar: set DDA_SQLITE "
                 "and DDA_SIMPLEXES_JSON (mapped code list).",
             )
+        # Effective as-of consistency (flag 3): if the dyad has a
+        # rollup row at or before the requested as-of, that
+        # rollup date is the effective as-of for LC-07 too.
+        # Otherwise fall back to the /dev/ DDA pattern (requested
+        # verbatim, or latest DDA date when omitted).
+        effective = None
+        rollup_path = config.rollup_path()
+        if rollup_path is not None and rollup_path.exists():
+            try:
+                rconn = lc_store.connect(rollup_path)  # type: ignore[arg-type]
+                try:
+                    effective = lc_store.resolve_rollup_as_of(
+                        rconn, iso1, iso2, as_of)
+                finally:
+                    rconn.close()
+            except sqlite3.Error:
+                effective = None
+        call_as_of = effective if effective is not None else as_of
         try:
             conn = lc_store.connect(dda)  # type: ignore[arg-type]
             try:
                 mapped = dev_dda_store.load_mapped(simplexes_p)  # type: ignore[arg-type]
                 meta = dev_dda_store.fetch_sidecar_meta(conn)
-                data = lc_store.fetch_lc07(conn, mapped, iso1, iso2, as_of)
+                data = lc_store.fetch_lc07(
+                    conn, mapped, iso1, iso2, call_as_of)
                 data["sidecar"] = meta
             finally:
                 conn.close()
         except (sqlite3.Error, OSError, ValueError) as exc:
             return _fail(
-                provenance, [], 503, "db_error",
+                provenance, warnings, 503, "db_error",
                 f"Could not read DDA sidecar: {exc}",
             )
-        return _ok(provenance, [], data)
+        return _ok(provenance, warnings, data)
 
     return app
 

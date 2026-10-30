@@ -336,12 +336,33 @@ def test_lc_missing_config_503(tmp_path, monkeypatch):
         assert r.json()["provenance"]["message"] == LC_MSG
 
 
-def test_lc_version_gate_exempt(lc_env):
-    # api_version=99 would 409 on v1 and /dev/; /lc/ stays 200.
+def test_lc_version_gate_matches_dev(lc_env):
+    # Dan 2026-10-30 flag 1: /lc/ applies the same gate as /dev/.
+    # api_version=99 409s in strict mode; 1 and no version pass.
     for path in ("/lc/lc-01", "/lc/lc-02", "/lc/lc-05", "/lc/lc-07"):
         r = lc_env.get(
             f"{path}?iso1=AAA&iso2=BBB&as_of=2026-09-30&api_version=99")
+        assert r.status_code == 409, path
+        r = lc_env.get(
+            f"{path}?iso1=AAA&iso2=BBB&as_of=2026-09-30&api_version=1")
+        assert r.status_code == 200, path
+        r = lc_env.get(f"{path}?iso1=AAA&iso2=BBB&as_of=2026-09-30")
         assert r.status_code == 200, path
     # Sanity: the gate still fires on a v1 endpoint in this env.
     r = lc_env.get("/dyad-status?iso1=AAA&iso2=BBB&api_version=99")
     assert r.status_code == 409
+
+
+def test_lc07_effective_as_of_matches_rollup(lc_env):
+    # Dan 2026-10-30 flag 3: LC-07 shares LC-01/02/05's effective
+    # as-of (latest rollup row <= requested). AAA_BBB's rollup
+    # ends 2026-09-30, so a 2026-10-05 request resolves to
+    # 2026-09-30 (constant series, ratio 1.0) instead of the
+    # verbatim 2026-10-05 window, which would dilute the pooled
+    # volume with zero-volume October days.
+    r = lc_env.get("/lc/lc-07?iso1=AAA&iso2=BBB&as_of=2026-10-05")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["volume_ratio"] == pytest.approx(1.0)
+    assert data["pooled_7d_volume"] == pytest.approx(70.0)

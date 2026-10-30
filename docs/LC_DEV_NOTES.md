@@ -25,15 +25,13 @@ message is exactly:
   stays exactly the LC string).
 - **Unknown dyads** return 200 with empty rows/nulls, never
   404 — the /dev/ discipline.
-- **Version-gate exemption:** `/lc/` endpoints accept an
-  optional `api_version` parameter but NEVER fail on it (no
-  409). FLAG — this is a deliberate deviation from the /dev/
-  pattern, not a copy of it: the /dev/ endpoints DO apply the
-  gate (pinned by
-  `tests/test_dev_dda.py::test_dev_version_gate_strict`),
-  despite the Wave 1 brief's premise that /dev/ is exempt.
-  The brief's explicit exemption requirement was followed and
-  the discrepancy is recorded here for confirmation.
+- **Version gate (RESOLVED 2026-10-30, Dan flag 1):** `/lc/`
+  endpoints apply the SAME gate as `/dev/` (strict 409, warn
+  warning). The Wave 1 build was exempt per a brief premise
+  that /dev/ is exempt; that premise was wrong (/dev/ is gated,
+  pinned by `tests/test_dev_dda.py::test_dev_version_gate_strict`),
+  and Dan flipped /lc/ to match /dev/ for now, deferring
+  versioning questions until the fast feedback/dev cycle ends.
 - **Tests:** `tests/test_lc.py` (9 tests); full suite 38
   passed (29 pre-existing + 9 new).
 
@@ -154,14 +152,25 @@ Source: `volume_regime` in the analytics worktree
   feedback (frontend work, not backend). No backend routes
   exist for them in this round.
 
-## Open / flagged for confirmation
+## Resolved flags (Dan, 2026-10-30)
 
-1. Version-gate exemption vs the /dev/ pattern (see above):
-   /dev/ applies the gate; /lc/ is exempt per the brief.
-2. LC-05 "steady" passthrough: agreed-steady sets surface as
-   chips with direction "steady" (see above).
-3. LC-07 caution trigger (rarity + level, see above) and the
-   validity gate are dev choices, not proposal text.
-4. LC-01/02/05 effective-as-of resolution (latest stored
-   as-of <= requested) vs exact-match: chosen so windows end
-   at as-of even for sparse dyads.
+1. Version gate: flipped to match /dev/ (see above).
+2. LC-05 "steady" passthrough: KEPT as built. Dan prefers
+   the state made explicit: agreed-steady sets surface as
+   chips with direction "steady"; omitting them could read as
+   a bug / missing data rather than a real piece of
+   information. No change.
+3. Effective as-of consistency: LC-07 now shares LC-01/02/05's
+   rule — the dyad's latest rollup row <= requested is the
+   effective as-of for all four figures. Fallback: a dyad
+   with no rollup row (or rollup unavailable) keeps the /dev/
+   DDA pattern for LC-07 only; the other figures are empty
+   for such a dyad in any case.
+
+## Still open / dev choices (not proposal text)
+
+- LC-07 caution trigger (rarity + level, see above) and the
+  validity gate are dev choices, not proposal text.
+- LC-01/02/05 effective-as-of resolution (latest stored
+  as-of <= requested) vs exact-match: chosen so windows end
+  at as-of even for sparse dyads.
