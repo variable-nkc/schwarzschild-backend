@@ -209,12 +209,14 @@ def test_lc02_rows_provisional_dots_no_composite(lc_env):
     assert ev["inputs"]["days_present_7"] == 7.0
     assert ev["inputs"]["sets_with_sufficient_support"] == list(SETS)
     assert ev["inputs"]["sets_with_insufficient_support"] == []
-    # Stability: 3 of 5 sets agree (esc, stab, crit).
+    # Stability (revised 2026-10-30): fixture R7 dirs are constant
+    # across days, so every set agrees 7/7 -> all green, full window.
     st = rows["stability"]
-    assert st["dots"] == 3
-    assert st["inputs"]["agree_count"] == 3
-    assert st["inputs"]["compared_count"] == 5
-    assert st["inputs"]["per_set"]["instability"]["agree"] is False
+    assert st["dot_states"] == ["green"] * 5
+    assert st["inputs"]["window_days"] == 7
+    assert st["inputs"]["short_history"] is False
+    assert st["inputs"]["per_set"]["instability"]["agree_days"] == 7
+    assert st["inputs"]["per_set"]["instability"]["dot"] == "green"
     # Data row: dots null, reason verbatim. No composite anywhere.
     assert rows["data"]["dots"] is None
     assert rows["data"]["reason"] == DATA_REASON
@@ -366,3 +368,73 @@ def test_lc07_effective_as_of_matches_rollup(lc_env):
     assert data["as_of"] == "2026-09-30"
     assert data["volume_ratio"] == pytest.approx(1.0)
     assert data["pooled_7d_volume"] == pytest.approx(70.0)
+
+
+def _stability_rollup(tmp_path, dyad_days):
+    """Build a rollup DB from {(iso1, iso2): [(as_of, {set: dir})]}.
+
+    Only the columns LC-02 reads are populated; other columns are
+    given neutral values. Returns the DB path.
+    """
+    db = tmp_path / "stab_rollup.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(f"CREATE TABLE dyad_status_rollup ({_rollup_columns()})")
+    for (iso1, iso2), days in dyad_days.items():
+        for as_of, dirs in days:
+            vals = [iso1, iso2, as_of, "steady", 0, 0, 0, 0,
+                    0.3, 100.0, 7.0, "", "test-build", 366, "2026-10-01"]
+            for s in SETS:
+                vals += [dirs.get(s, "steady"), 0.0, 0.1, "steady"]
+            con.execute(
+                f"INSERT INTO dyad_status_rollup VALUES "
+                f"({', '.join('?' * len(vals))})", vals)
+    con.commit()
+    con.close()
+    return db
+
+
+def test_lc02_stability_graded_dots(tmp_path, monkeypatch):
+    # Last 7 as-ofs 2026-09-24..30, today = 2026-09-30.
+    days = []
+    esc = ["steady"] * 5 + ["up", "up"]
+    stab = ["steady"] * 7
+    inst = ["steady"] * 6 + ["up"]
+    deesc = ["steady"] * 7
+    crit = ["down"] + ["steady"] * 6
+    for i, day in enumerate(range(24, 31)):
+        days.append((f"2026-09-{day}", {
+            "escalatory": esc[i], "stability": stab[i],
+            "instability": inst[i], "deescalatory": deesc[i],
+            "critical_incidents": crit[i]}))
+    db = _stability_rollup(tmp_path, {("GGG", "HHH"): days})
+    monkeypatch.setenv("ROLLUP_SQLITE", str(db))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    client = TestClient(create_app())
+    r = client.get("/lc/lc-02?iso1=GGG&iso2=HHH&as_of=2026-09-30")
+    assert r.status_code == 200
+    st = {row["row"]: row for row in r.json()["data"]["rows"]}["stability"]
+    # esc 2/7 empty, stab 7/7 green, inst 1/7 empty,
+    # deesc 7/7 green, crit 6/7 yellow — in SETS order.
+    assert st["dot_states"] == ["empty", "green", "empty", "green", "yellow"]
+    assert st["inputs"]["window_days"] == 7
+    assert st["inputs"]["short_history"] is False
+    assert st["inputs"]["per_set"]["escalatory"]["agree_days"] == 2
+    assert st["inputs"]["per_set"]["critical_incidents"]["agree_days"] == 6
+
+
+def test_lc02_stability_short_history_flag(tmp_path, monkeypatch):
+    # Only 3 as-ofs, all dirs steady: agree 3/3 -> empty by the
+    # count thresholds, and short_history must be flagged.
+    days = [(f"2026-09-{d}", {s: "steady" for s in SETS})
+            for d in (28, 29, 30)]
+    db = _stability_rollup(tmp_path, {("III", "JJJ"): days})
+    monkeypatch.setenv("ROLLUP_SQLITE", str(db))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    client = TestClient(create_app())
+    r = client.get("/lc/lc-02?iso1=III&iso2=JJJ&as_of=2026-09-30")
+    assert r.status_code == 200
+    st = {row["row"]: row for row in r.json()["data"]["rows"]}["stability"]
+    assert st["dot_states"] == ["empty"] * 5
+    assert st["inputs"]["window_days"] == 3
+    assert st["inputs"]["short_history"] is True
+    assert "Short history" in st["reason"]

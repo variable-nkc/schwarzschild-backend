@@ -35,10 +35,24 @@ LC-02 EVIDENCE RULE (provisional dev-only): dots (0-5) =
   convenient dev anchors; neither borrowing is a formalization
   decision.
 
-LC-02 STABILITY RULE (provisional dev-only): dots (0-5) = one dot
-  per analyst set (of 5) whose R7 direction and R28 direction are
-  both present and equal. Sets missing either direction are not
-  counted and do not score.
+LC-02 STABILITY RULE (provisional dev-only, revised Dan
+2026-10-30 feedback round 1): per analyst set, count the days
+in the last STABILITY_WINDOW_DAYS as-ofs (including the
+effective as-of) on which that set's R7 direction equals its
+R7 direction at the effective as-of. Missing directions count
+as not agreeing. Dot per set, in SETS order:
+  agree == 7 -> "green" (held all week);
+  4 <= agree <= 6 -> "yellow" (held most of the week);
+  agree <= 3 -> "empty" (not held).
+Dots are per-set states, NOT a count: the row's dots are
+listed in set order, and the reason lists each set's
+agree/window count, so colour is never the sole carrier.
+SHORT HISTORY FLAG: when fewer than 7 as-of rows are
+available for the dyad, window_days < 7 and short_history is
+true; the same thresholds apply to the count (so a short
+history can never earn green, and a 3-day fully-agreeing
+history reads as empty). The frontend must show the
+short-history flag whenever short_history is true.
 
 LC-05 DISTANCE RULE (provisional dev-only): from |std_r7|:
   |std| >= 3 -> "well above usual" (std > 0) / "well below usual"
@@ -166,6 +180,9 @@ LC07_RATIO_HI = 1.5
 LC07_RATIO_LO = 2.0 / 3.0
 
 # LC-02 provisional evidence thresholds (see module docstring).
+STABILITY_WINDOW_DAYS = 7
+STABILITY_GREEN_MIN = 7
+STABILITY_YELLOW_MIN = 4
 EVIDENCE_DAYS_FLOOR = 4
 EVIDENCE_DAYS_HIGH = 6
 EVIDENCE_VOLUME_FLOOR = 30
@@ -429,38 +446,57 @@ def fetch_lc02(
         )
         + ". Provisional dev-only scoring (see LC_DEV_NOTES.md)."
     )
+    # Stability (revised 2026-10-30): per-set R7-direction
+    # agreement over the last 7 as-ofs including the effective
+    # as-of. R7-vs-R28 agreement was retired because it
+    # conflated a genuine medium-horizon trend change with
+    # short-term noise (Dan feedback round 1).
+    hist = conn.execute(
+        "SELECT as_of, "
+        + ", ".join(f"dir_r7_{s}" for s in SETS)
+        + " FROM dyad_status_rollup WHERE iso1 = ? AND iso2 = ? "
+        "AND as_of <= ? ORDER BY as_of DESC LIMIT ?",
+        (iso1, iso2, effective, STABILITY_WINDOW_DAYS),
+    ).fetchall()
+    window_days = len(hist)
+    short_history = window_days < STABILITY_WINDOW_DAYS
     per_set = {}
-    agree = 0
-    compared = 0
+    dot_states = []
     for s in SETS:
-        r7 = row.get(f"dir_r7_{s}")
-        r28 = row.get(f"dir_r28_{s}")
-        is_agree = r7 is not None and r28 is not None and r7 == r28
-        if r7 is not None and r28 is not None:
-            compared += 1
-            if is_agree:
-                agree += 1
-        per_set[s] = {"r7_dir": r7, "r28_dir": r28, "agree": is_agree}
-    if compared:
-        stability_reason = (
-            f"R7 and R28 directions agree on {agree} of {compared} "
-            "sets with both directions present"
-            + (
-                " (disagree: "
-                + ", ".join(s for s in SETS if not per_set[s]["agree"]
-                            and per_set[s]["r7_dir"] is not None
-                            and per_set[s]["r28_dir"] is not None)
-                + ")"
-                if agree < compared
-                else ""
-            )
-            + ". Provisional dev-only scoring (see LC_DEV_NOTES.md)."
+        today_dir = row.get(f"dir_r7_{s}")
+        agree_days = sum(
+            1 for h in hist
+            if today_dir is not None and h[f"dir_r7_{s}"] == today_dir
         )
-    else:
-        stability_reason = (
-            "No set has both an R7 and an R28 direction present. "
-            "Provisional dev-only scoring (see LC_DEV_NOTES.md)."
+        if agree_days >= STABILITY_GREEN_MIN:
+            dot = "green"
+        elif agree_days >= STABILITY_YELLOW_MIN:
+            dot = "yellow"
+        else:
+            dot = "empty"
+        per_set[s] = {
+            "today_dir": today_dir,
+            "agree_days": agree_days,
+            "window_days": window_days,
+            "dot": dot,
+        }
+        dot_states.append(dot)
+    stability_reason = (
+        "R7 direction agreement over the last "
+        f"{window_days} as-of(s) (including today): "
+        + ", ".join(
+            f"{s} {per_set[s]['agree_days']}/{window_days} "
+            f"({per_set[s]['dot']})" for s in SETS
         )
+        + (
+            f". Short history: stability assessed over only "
+            f"{window_days} of {STABILITY_WINDOW_DAYS} days — "
+            "interpret with caution."
+            if short_history
+            else ""
+        )
+        + ". Provisional dev-only scoring (see LC_DEV_NOTES.md)."
+    )
     return {
         "dyad": f"{iso1}_{iso2}",
         "as_of": effective,
@@ -480,12 +516,14 @@ def fetch_lc02(
             },
             {
                 "row": "stability",
-                "dots": agree,
+                "dots": None,
+                "dot_states": dot_states,
                 "reason": stability_reason,
                 "inputs": {
                     "per_set": per_set,
-                    "agree_count": agree,
-                    "compared_count": compared,
+                    "window_days": window_days,
+                    "short_history": short_history,
+                    "dot_states": dot_states,
                 },
                 "provisional": True,
             },

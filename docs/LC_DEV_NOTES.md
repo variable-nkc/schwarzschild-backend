@@ -87,10 +87,19 @@ LC-02 EVIDENCE RULE (provisional dev-only): dots (0-5) =
   convenient dev anchors; neither borrowing is a formalization
   decision.
 
-LC-02 STABILITY RULE (provisional dev-only): dots (0-5) = one dot
-  per analyst set (of 5) whose R7 direction and R28 direction are
-  both present and equal. Sets missing either direction are not
-  counted and do not score.
+LC-02 STABILITY RULE (provisional dev-only, revised Dan
+  2026-10-30 feedback round 1): per analyst set, count the days
+  in the last 7 as-ofs (including the effective as-of) on which
+  that set's R7 direction equals its R7 direction at the
+  effective as-of. Missing directions count as not agreeing.
+  Dot per set, in set order: agree 7/7 -> green (held all
+  week); 4-6/7 -> yellow (held most of the week); <=3/7 ->
+  empty (not held). The R7-vs-R28 rule was retired because it
+  conflated a genuine medium-horizon trend change with
+  short-term noise. SHORT HISTORY FLAG: when fewer than 7
+  as-of rows are available, window_days < 7 and short_history
+  is true; the same count thresholds apply (a short history
+  can never earn green), and the frontend shows the flag.
 
 LC-05 DISTANCE RULE (provisional dev-only): from |std_r7|:
   |std| >= 3 -> "well above usual" (std > 0) / "well below usual"
