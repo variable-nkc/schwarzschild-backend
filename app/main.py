@@ -586,7 +586,7 @@ def create_app() -> FastAPI:
         )
 
     # ------------------------------------------------------------------
-    # DEV ONLY — Look-Closer endpoints (Wave 1, /lc/ prefix).
+    # DEV ONLY — Look-Closer endpoints (Waves 1-2, /lc/ prefix).
     # NOT part of the v1 contract: do not build frontend features
     # on these paths as contract, and do not promote them without
     # the formalization step. Every envelope's provenance message
@@ -607,7 +607,10 @@ def create_app() -> FastAPI:
     # the other figures are empty for such a dyad in any case.
     # LC-01/02/05 read the rollup (ROLLUP_SQLITE); LC-07 reads
     # the DDA sidecar (DDA_SQLITE) plus the mapped code list
-    # (DDA_SIMPLEXES_JSON). Missing config means 503, same
+    # (DDA_SIMPLEXES_JSON). Wave 2: LC-06 reads the DDA sidecar
+    # plus the simplex list (DDA_SIMPLEXES_JSON) with the same
+    # rollup-effective-as-of fallback as LC-07; LC-08 and
+    # LC-09 read the rollup only. Missing config means 503, same
     # discipline as the v1 data endpoints. Unknown dyads return
     # 200 with empty rows/nulls, never 404.
     # ------------------------------------------------------------------
@@ -856,6 +859,121 @@ def create_app() -> FastAPI:
             return _fail(
                 provenance, warnings, 503, "db_error",
                 f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
+    @app.get("/lc/lc-06", response_model=None)
+    def lc_06(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if dda is None or simplexes_p is None:
+            return _lc_missing(
+                provenance,
+                "LC DEV ONLY — no usable DDA sidecar: set DDA_SQLITE "
+                "and DDA_SIMPLEXES_JSON (simplex list).",
+            )
+        # Same effective-as-of discipline as LC-07 (flag 3).
+        effective = None
+        rollup_path = config.rollup_path()
+        if rollup_path is not None and rollup_path.exists():
+            try:
+                rconn = lc_store.connect(rollup_path)  # type: ignore[arg-type]
+                try:
+                    effective = lc_store.resolve_rollup_as_of(
+                        rconn, iso1, iso2, as_of)
+                finally:
+                    rconn.close()
+            except sqlite3.Error:
+                effective = None
+        call_as_of = effective if effective is not None else as_of
+        try:
+            conn = lc_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                simplexes = dev_dda_store.load_simplexes(simplexes_p)  # type: ignore[arg-type]
+                data = lc_store.fetch_lc06(
+                    conn, simplexes, iso1, iso2, call_as_of)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
+    @app.get("/lc/lc-08", response_model=None)
+    def lc_08(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, path = _lc_rollup()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if path is None:
+            return _lc_missing(
+                provenance,
+                "LC DEV ONLY — no usable rollup DB: set ROLLUP_SQLITE "
+                "to a rollup_poc_base.sqlite path.",
+            )
+        try:
+            conn = lc_store.connect(path)  # type: ignore[arg-type]
+            try:
+                data = lc_store.fetch_lc08(conn, iso1, iso2, as_of)
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup DB: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
+    @app.get("/lc/lc-09", response_model=None)
+    def lc_09(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        provenance, path = _lc_rollup()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if path is None:
+            return _lc_missing(
+                provenance,
+                "LC DEV ONLY — no usable rollup DB: set ROLLUP_SQLITE "
+                "to a rollup_poc_base.sqlite path.",
+            )
+        try:
+            conn = lc_store.connect(path)  # type: ignore[arg-type]
+            try:
+                data = lc_store.fetch_lc09(conn, iso1, iso2, as_of)
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup DB: {exc}",
             )
         return _ok(provenance, warnings, data)
 

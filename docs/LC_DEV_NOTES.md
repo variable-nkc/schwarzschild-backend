@@ -1,8 +1,9 @@
-# LC dev endpoints — notes (dev/dda-sidecar branch, Wave 1)
+# LC dev endpoints — notes (dev/dda-sidecar branch, Waves 1-2)
 
 **Status: dev only, 2026-10-30. Not contract.** The `/lc/`
 endpoints serve Look-Closer Wave 1 figures (LC-01, LC-02, LC-05,
-LC-07) from the rollup and the DDA sidecar. They are DEV ONLY
+LC-07) and Wave 2 figures (LC-06, LC-08, LC-09 Part 1) from the
+rollup and the DDA sidecar. They are DEV ONLY
 and never part of the v1 contract: do not build frontend
 features on these paths as contract, and do not promote them
 without the formalization step. Every envelope's provenance
@@ -14,7 +15,8 @@ message is exactly:
 
 - **Module:** `app/lc_store.py` (plain dicts, same split as
   `app/store.py`) + routes in `app/main.py` (`/lc/lc-01`,
-  `/lc/lc-02`, `/lc/lc-05`, `/lc/lc-07`). All GET, iso1/iso2
+  `/lc/lc-02`, `/lc/lc-05`, `/lc/lc-07`, `/lc/lc-06`,
+  `/lc/lc-08`, `/lc/lc-09`). All GET, iso1/iso2
   required, as_of optional. Windows END AT as-of, never at the
   snapshot end.
 - **Env names reused from /dev/** (no new names):
@@ -122,6 +124,81 @@ LC-07 CAUTION RULE (dev-only wording threshold, not
 methodology): caution is true exactly when today's volume is
 BOTH rare (baseline tail <= 0.05 or >= 0.95) AND large in level
 (volume_ratio >= 1.5 or <= 2/3); otherwise false with null text.
+
+LC-06 RULE (Wave 2, provisional dev-only): DDA sidecar only.
+Effective as-of follows the LC-07 flag-3 pattern (rollup
+latest <= requested when the dyad has one, else the /dev/
+DDA pattern). Now window = 60 calendar days ending at the
+effective as-of; then window = 60 days ending 90 days
+earlier (Dan 2026-10-30: 60 days for as-of flexibility in
+the current dev dataset, NOT a methodological decision).
+Each window's pooled mix is the volume-weighted closed
+geometric mean over days with a non-null joint, weights =
+joint_volume (the frontend dda_pooled_joint log-domain
+logic, mirrored server-side). Phases are p1..p5 only.
+coverage = joint_volume / volume_total (null when the
+window has no volume); mix is null when no day has a
+joint. low_support is true when either window's coverage
+is below 0.50 (provisional floor); a null coverage (empty
+window) is no data, not low-support. NO largest-movement
+sentence is served — the frontend computes it from the
+two mixes. Two fetch_joint calls, one per window.
+
+LC-08 RULE (Wave 2, provisional dev-only, bullet Option A):
+rollup only. Effective as-of via _resolve_rollup_as_of.
+History = the last 60 rollup rows <= effective, including
+it. Per set: last_week is the stored std_resid_r7 at the
+effective row (null if missing, never zero-filled); the
+band is p10-p90 by nearest rank (index ceil(q*n)-1) over
+that set's present std_resid_r7 values in the history,
+requiring >= 10 present values, else lo/hi null. Net:
+per-as-of R = (esc+inst+CI)-(stab+deesc) over std_resid_r7,
+computed ONLY on as-ofs where all five stds are present;
+net last_week is R at the effective row (null when any
+std is missing there), net band p10-p90 over the
+computable R values with the same >= 10 rule. inside =
+lo <= value <= hi (inclusive); distance_outside is 0 when
+inside or when the value is null, else value-hi (above)
+or value-lo (below), signed. Edge case, decided here:
+when a value exists but its band does not, inside is
+False and distance_outside is null — never 0, which
+would falsely read as inside. Band edges are a
+provisional dev choice (p10-p90 over 60 as-ofs), stated
+in the payload's band_method string, calibratable from
+analyst feedback without a rebuild.
+
+LC-09 RULE (Wave 2, Part 1 ONLY — ghost strip parked,
+provisional dev-only): rollup only. Effective as-of via
+_resolve_rollup_as_of. Peer rule (proposal, named in the
+payload): "all dyads with the same first actor" — dyads
+with iso1 == focal iso1, iso2 != focal iso2, with a
+rollup row at exactly the effective as-of (one indexed
+query). Temperature is the stored rollup `temperature`
+column. Supported (hollow otherwise) = days_present_7
+>= 4 AND v_7d >= 30 (the LC-02 evidence floors, borrowed
+as provisional dev anchors). Typical temperature per
+dyad (focal + each peer) = median temperature over the
+dyad's latest 14 as-ofs excluding effective, present
+temps only among those rows; null when fewer than 7
+valid temps. A null temperature inside the 14-as-of
+window does NOT extend the window further back — the
+window is as-ofs, not valid temperatures. The history
+query is bounded to 45 days before effective (the panel
+is daily, so 14 as-ofs always fall inside; a sparse dyad
+uses what is available under the 7-floor) — and the peer
+query pins INDEXED BY idx_rollup_dyad: without it the
+planner picks the as-of index and walks 26,030 scattered
+rows (42s for USA on the VM, over the frontend's 30s
+client timeout; pinned, 0.02s). Rank = 1 +
+peers strictly greater (today: temperature; typical:
+typical_temperature, over peers with a non-null value
+in each case); a null focal value -> null rank. Peers
+sort by temperature descending, nulls last, dyad
+ascending as the deterministic tie-break. Peer history
+is ONE query for the whole peer set (iso1 = focal iso1,
+as_of < effective, grouped in Python) — never one query
+per peer. The focal payload also carries the focal
+label, for the strip diamond's label colour.
 
 ## [2.05] volume definition (traced, replicated exactly)
 

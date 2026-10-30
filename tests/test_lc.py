@@ -469,3 +469,281 @@ def test_lc02_stability_insufficient_never_agrees(tmp_path, monkeypatch):
     assert st["inputs"]["per_set"]["escalatory"]["today_dir"] == "insufficient"
     assert st["inputs"]["per_set"]["escalatory"]["agree_days"] == 0
     assert st["inputs"]["per_set"]["stability"]["agree_days"] == 2
+
+
+# ------------------------------------------------------------------
+# Wave 2: LC-06 / LC-08 / LC-09
+# ------------------------------------------------------------------
+
+def _wave2_client(monkeypatch, rollup_db=None, dda_db=None, tokens=None):
+    """TestClient with Wave 2 env (any of the three may be None)."""
+    if rollup_db is not None:
+        monkeypatch.setenv("ROLLUP_SQLITE", str(rollup_db))
+    if dda_db is not None:
+        monkeypatch.setenv("DDA_SQLITE", str(dda_db))
+    if tokens is not None:
+        monkeypatch.setenv("DDA_SIMPLEXES_JSON", str(tokens))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    return TestClient(create_app())
+
+
+def test_lc06_pooled_mix_null_joint_skipped_and_low_support(
+        tmp_path, monkeypatch):
+    """LC-06: pooled geometric mean, null-joint day skipped,
+    coverage, and the low-support floor.
+
+    Simplexes have no zeros, so no delta replacement enters
+    the hand computation. Now window (60d ending 2026-09-30):
+    2026-09-28 null-joint code 030 x5, 2026-09-29 code 010
+    x10, 2026-09-30 code 020 x10. Then window (60d ending
+    2026-07-02): code 010 on both days, so the pooled mix
+    is exactly code 010's simplex. Second dyad CCC_DDD has
+    now-window coverage 1/11 < 0.50 -> low_support.
+    """
+    import math
+
+    rollup = _stability_rollup(tmp_path, {
+        ("AAA", "BBB"): [("2026-09-30", {s: "steady" for s in SETS})],
+        ("CCC", "DDD"): [("2026-09-30", {s: "steady" for s in SETS})],
+    })
+    dda = tmp_path / "dda.sqlite"
+    con = sqlite3.connect(dda)
+    con.execute(
+        "CREATE TABLE dda (id INTEGER, iso1 TEXT, iso2 TEXT,"
+        " obs_date DATE, cameo_code TEXT, obs_count INTEGER)"
+    )
+    rows = [
+        (1, "AAA", "BBB", "2026-09-28", "030", 5),
+        (2, "AAA", "BBB", "2026-09-29", "010", 10),
+        (3, "AAA", "BBB", "2026-09-30", "020", 10),
+        (4, "AAA", "BBB", "2026-07-01", "010", 30),
+        (5, "AAA", "BBB", "2026-07-02", "010", 10),
+        (6, "CCC", "DDD", "2026-09-30", "010", 1),
+        (7, "CCC", "DDD", "2026-09-30", "999", 10),
+    ]
+    con.executemany("INSERT INTO dda VALUES (?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    tokens = tmp_path / "cameo_tokens.json"
+    tokens.write_text(json.dumps([
+        {"code": "010", "p1": 0.4, "p2": 0.3, "p3": 0.2,
+         "p4": 0.05, "p5": 0.05},
+        {"code": "020", "p1": 0.1, "p2": 0.1, "p3": 0.2,
+         "p4": 0.3, "p5": 0.3},
+        {"code": "030", "p1": None, "p2": None, "p3": None,
+         "p4": None, "p5": None},
+    ]), encoding="utf-8")
+    client = _wave2_client(monkeypatch, rollup, dda, tokens)
+    r = client.get("/lc/lc-06?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    assert r.json()["provenance"]["message"] == LC_MSG
+    data = r.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["provisional"] is True
+    assert data["window_days"] == 60
+    assert data["comparison_days_ago"] == 90
+    now = data["now"]
+    assert now["window_start"] == "2026-08-02"
+    assert now["window_end"] == "2026-09-30"
+    assert now["days_with_joint"] == 2
+    assert now["joint_volume"] == 20
+    assert now["volume_total"] == 25
+    assert now["coverage"] == pytest.approx(0.8)
+    # Equal-weight geometric mean of 010 and 020, closed.
+    raw = [math.sqrt(a * b) for a, b in zip(
+        (0.4, 0.3, 0.2, 0.05, 0.05), (0.1, 0.1, 0.2, 0.3, 0.3))]
+    total = sum(raw)
+    for p, expected in zip(("p1", "p2", "p3", "p4", "p5"), raw):
+        assert now["mix"][p] == pytest.approx(expected / total)
+    then = data["then"]
+    assert then["window_start"] == "2026-05-04"
+    assert then["window_end"] == "2026-07-02"
+    assert then["days_with_joint"] == 2
+    assert then["joint_volume"] == 40
+    assert then["volume_total"] == 40
+    assert then["coverage"] == pytest.approx(1.0)
+    for p, expected in zip(
+            ("p1", "p2", "p3", "p4", "p5"),
+            (0.4, 0.3, 0.2, 0.05, 0.05)):
+        assert then["mix"][p] == pytest.approx(expected)
+    assert data["low_support"] is False
+    assert data["low_support_reason"] is None
+    # Low-support dyad: now coverage 1/11, then window empty
+    # (coverage null, not low-support on its own).
+    r = client.get("/lc/lc-06?iso1=CCC&iso2=DDD&as_of=2026-09-30")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["now"]["coverage"] == pytest.approx(1 / 11)
+    assert data["then"]["coverage"] is None
+    assert data["low_support"] is True
+    assert "now window coverage" in data["low_support_reason"]
+
+
+def _lc08_rollup(tmp_path, dyad_days):
+    """Rollup DB from {dyad: [(as_of, {set: std_or_None})]}."""
+    db = tmp_path / "lc08.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(f"CREATE TABLE dyad_status_rollup ({_rollup_columns()})")
+    for (iso1, iso2), days in dyad_days.items():
+        for as_of, stds in days:
+            vals = [iso1, iso2, as_of, "steady", 0, 0, 0, 0,
+                    0.3, 100.0, 7.0, "", "test-build", 366, "2026-10-01"]
+            for s in SETS:
+                vals += ["steady", stds.get(s), 0.1, "steady"]
+            con.execute(
+                f"INSERT INTO dyad_status_rollup VALUES "
+                f"({', '.join('?' * len(vals))})", vals)
+    con.commit()
+    con.close()
+    return db
+
+
+def test_lc08_bands_inside_outside_net_skips_missing(tmp_path, monkeypatch):
+    """LC-08: p10-p90 nearest-rank bands, inside/outside with
+    signed distance, and net R skipping as-ofs with a missing
+    std. 12 as-ofs 2026-09-19..30 (d=1..12); deescalatory is
+    missing on d=6, critical_incidents on d=5, so net has 10
+    computable values, not 12."""
+    days = []
+    for d in range(1, 13):
+        days.append((f"2026-09-{18 + d}", {
+            "escalatory": float(d),
+            "stability": 0.0,
+            "instability": float(-d),
+            "deescalatory": None if d == 6 else 0.0,
+            "critical_incidents": None if d == 5 else float(d),
+        }))
+    db = _lc08_rollup(tmp_path, {("AAA", "BBB"): days})
+    client = _wave2_client(monkeypatch, rollup_db=db)
+    r = client.get("/lc/lc-08?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["window_days"] == 60
+    assert data["history_rows"] == 12
+    assert data["band_method"] == (
+        "p10-p90 nearest-rank over trailing 60 rollup "
+        "as-ofs incl. effective"
+    )
+    per = data["per_set"]
+    assert list(per.keys()) == list(SETS)
+    # esc 1..12: p10 idx ceil(1.2)-1=1 -> 2; p90 idx
+    # ceil(10.8)-1=10 -> 11; last 12 -> outside, +1.
+    assert per["escalatory"] == {
+        "last_week": 12.0, "lo": 2.0, "hi": 11.0, "n": 12,
+        "inside": False, "distance_outside": 1.0}
+    assert per["stability"] == {
+        "last_week": 0.0, "lo": 0.0, "hi": 0.0, "n": 12,
+        "inside": True, "distance_outside": 0}
+    # inst -12..-1: p10 -> -11, p90 -> -2; last -12 -> -1.
+    assert per["instability"] == {
+        "last_week": -12.0, "lo": -11.0, "hi": -2.0, "n": 12,
+        "inside": False, "distance_outside": -1.0}
+    assert per["deescalatory"]["n"] == 11
+    assert per["deescalatory"]["inside"] is True
+    # crit d except 5: p10 -> 2, p90 -> 11; last 12 -> +1.
+    assert per["critical_incidents"]["lo"] == 2.0
+    assert per["critical_incidents"]["hi"] == 11.0
+    assert per["critical_incidents"]["distance_outside"] == 1.0
+    # Net R = d on computable days (d != 5, 6): 10 values
+    # {1,2,3,4,7,8,9,10,11,12}; p10 -> 1, p90 -> 11.
+    net = data["net"]
+    assert net == {
+        "last_week": 12.0, "lo": 1.0, "hi": 11.0, "n": 10,
+        "inside": False, "distance_outside": 1.0}
+
+
+def test_lc08_band_null_below_floor(tmp_path, monkeypatch):
+    """LC-08: fewer than 10 present values -> lo/hi null, and
+    a present value with no band reports distance null (not
+    0, which would falsely read as inside)."""
+    days = []
+    for d in range(1, 13):
+        days.append((f"2026-09-{18 + d}", {
+            "escalatory": 2.0 if d >= 10 else None,
+            "stability": 0.0,
+            "instability": 0.0,
+            "deescalatory": 0.0,
+            "critical_incidents": 0.0,
+        }))
+    db = _lc08_rollup(tmp_path, {("AAA", "BBB"): days})
+    client = _wave2_client(monkeypatch, rollup_db=db)
+    r = client.get("/lc/lc-08?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    esc = r.json()["data"]["per_set"]["escalatory"]
+    assert esc == {
+        "last_week": 2.0, "lo": None, "hi": None, "n": 3,
+        "inside": False, "distance_outside": None}
+    # Net is computable only on the 3 esc-present days.
+    assert r.json()["data"]["net"]["n"] == 3
+    assert r.json()["data"]["net"]["lo"] is None
+
+
+def _lc09_rollup(tmp_path):
+    """Rollup for LC-09: focal AAA_BBB + peers AAA_CCC/DDD/
+    EEE/FFF at 2026-09-30, plus a BBB_CCC decoy (other iso1)."""
+    db = tmp_path / "lc09.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(f"CREATE TABLE dyad_status_rollup ({_rollup_columns()})")
+    con.execute(
+        "CREATE INDEX idx_rollup_dyad ON dyad_status_rollup(iso1, iso2, as_of)"
+    )
+    days = [f"2026-09-{d}" for d in range(16, 31)]
+    spec = {
+        # (today temp, today days, today v, prior temps)
+        ("AAA", "BBB"): (0.5, 7.0, 100.0, [0.4] * 14),
+        ("AAA", "CCC"): (0.8, 7.0, 100.0, [0.6] * 14),
+        ("AAA", "DDD"): (0.3, 2.0, 100.0, [0.2] * 14),
+        ("AAA", "EEE"): (None, 7.0, 10.0, [0.5] * 5),
+        ("AAA", "FFF"): (0.9, 7.0, 100.0, []),
+        ("BBB", "CCC"): (0.99, 7.0, 100.0, [0.99] * 14),
+    }
+    for (iso1, iso2), (temp, dp, v, prior) in spec.items():
+        rows = []
+        # Prior rows are as-ofs BEFORE effective only; EEE has
+        # only the last 5 of those.
+        before = [d for d in days if d != "2026-09-30"]
+        prior_days = before[-len(prior):] if prior else []
+        for as_of, t in zip(prior_days, prior):
+            rows.append((iso1, iso2, as_of, t, 7.0, 100.0))
+        rows.append((iso1, iso2, "2026-09-30", temp, dp, v))
+        for iso1_r, iso2_r, as_of, t, dp_r, v_r in rows:
+            vals = [iso1_r, iso2_r, as_of, "steady", 0, 0, 0, 0,
+                    t, v_r, dp_r, "", "test-build", 366, "2026-10-01"]
+            for s in SETS:
+                vals += ["steady", 0.0, 0.1, "steady"]
+            con.execute(
+                f"INSERT INTO dyad_status_rollup VALUES "
+                f"({', '.join('?' * len(vals))})", vals)
+    con.commit()
+    con.close()
+    return db
+
+
+def test_lc09_peer_ranks_typical_hollow(tmp_path, monkeypatch):
+    """LC-09 Part 1: same-first-actor peers only, today and
+    typical ranks, hollow support, typical null below 7
+    valid days, null temperatures sorted last."""
+    db = _lc09_rollup(tmp_path)
+    client = _wave2_client(monkeypatch, rollup_db=db)
+    r = client.get("/lc/lc-09?iso1=AAA&iso2=BBB&as_of=2026-09-30")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["peer_rule"] == "all dyads with the same first actor"
+    focal = data["focal"]
+    assert focal["temperature"] == 0.5
+    assert focal["typical_temperature"] == 0.4
+    # Greater today: CCC 0.8, FFF 0.9 -> rank 3. Greater
+    # typical: CCC 0.6 only -> typical rank 2.
+    assert focal["rank"] == 3
+    assert focal["typical_rank"] == 2
+    assert focal["peers_with_temperature"] == 3
+    assert focal["peers_with_typical"] == 2
+    peers = data["peers"]
+    assert [p["dyad"] for p in peers] == [
+        "AAA_FFF", "AAA_CCC", "AAA_DDD", "AAA_EEE"]
+    assert [p["supported"] for p in peers] == [True, True, False, False]
+    assert [p["typical_temperature"] for p in peers] == [
+        None, 0.6, 0.2, None]
+    assert peers[0]["temperature"] == 0.9
+    assert peers[-1]["temperature"] is None
