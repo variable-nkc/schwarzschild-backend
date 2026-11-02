@@ -87,23 +87,93 @@ def latest_as_of(path: Path) -> str | None:
     return row["m"] if row is not None else None
 
 
-def fetch_watchlist(
-    path: Path,
-    as_of: str | None,
+def _watchlist_scan_keys(
+    conn: sqlite3.Connection,
+    effective: str,
+    wanted: list[str],
+    limit: int,
+) -> list[tuple[str, str]]:
+    """Step 1 of the two-step watchlist: collect (iso1, iso2) keys in
+    final (label-priority, iso1, iso2) order via an iso-ordered scan.
+
+    The scan reads ``ORDER BY iso1, iso2, as_of`` — exactly the
+    ``idx_rollup_dyad`` order, so on any serving DB (which carries
+    that index) it is a covering-index scan with no sort. Rows are
+    bucketed by label in scan order, which IS iso order within each
+    label, and buckets are concatenated in label-priority order, so
+    the result matches the single-query ORDER BY exactly.
+
+    Early termination: the scan stops as soon as the FIRST priority
+    label's bucket reaches ``limit`` — later labels cannot displace
+    it, and later rows of that label are all iso-after the ones
+    already collected. This is what makes the unfiltered case fast:
+    at 2026-09-30 the scan stops after ~8,100 index entries
+    (0.10s measured) instead of materializing all 26,030 rows
+    (36s measured for the single-query form).
+
+    The scan is CORRECT with or without the index (without it,
+    SQLite sorts); the index only makes it fast. Pathological
+    case: if the first priority label has fewer than ``limit``
+    rows at this as-of, the scan runs to completion — still exact,
+    just no faster than the single-query form. At every real
+    as-of the first group (insufficient) is in the thousands, so
+    early termination fires.
+    """
+    buckets: dict[str, list[tuple[str, str]]] = {lab: [] for lab in wanted}
+    first = wanted[0]
+    cur = conn.execute(
+        "SELECT rowid, iso1, iso2, as_of FROM dyad_status_rollup "
+        "ORDER BY iso1, iso2, as_of"
+    )
+    for rowid, iso1, iso2, as_of in cur:
+        if as_of != effective:
+            continue
+        lab_row = conn.execute(
+            "SELECT label FROM dyad_status_rollup WHERE rowid = ?",
+            (rowid,),
+        ).fetchone()
+        lab = lab_row[0] if lab_row is not None else None
+        if lab not in buckets:
+            continue
+        buckets[lab].append((iso1, iso2))
+        if len(buckets[first]) >= limit:
+            break
+    out: list[tuple[str, str]] = []
+    for lab in wanted:
+        out.extend(buckets[lab])
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+def _fetch_rows_by_keys(
+    conn: sqlite3.Connection,
+    keys: list[tuple[str, str]],
+    effective: str,
+) -> list[dict]:
+    """Step 2 of the two-step watchlist: full rows for ``keys``, in
+    key order, via point lookups on ``idx_rollup_dyad``."""
+    rows = []
+    for iso1, iso2 in keys:
+        row = conn.execute(
+            "SELECT * FROM dyad_status_rollup "
+            "WHERE iso1 = ? AND iso2 = ? AND as_of = ?",
+            (iso1, iso2, effective),
+        ).fetchone()
+        if row is not None:
+            rows.append(_row_to_dict(row))
+    return rows
+
+
+def _fetch_watchlist_sorted(
+    conn: sqlite3.Connection,
+    effective: str,
     labels: list[str] | None,
     limit: int,
-) -> tuple[str | None, list[dict]]:
-    """Return (effective as_of, rows) for one as-of.
-
-    Rows are full rollup rows, in hot-first label-priority order as a
-    first pass (see config.LABEL_PRIORITY), then by dyad for a
-    deterministic order within a label. With no as_of, the latest
-    as-of in the DB is used. An as-of with no rows returns an empty
-    list, not an error: an empty watchlist is a legitimate answer.
-    """
-    effective = as_of if as_of is not None else latest_as_of(path)
-    if effective is None:
-        return None, []
+) -> list[dict]:
+    """The original single-query watchlist (kept for the
+    non-insufficient path, where it is already fast: 2.8s measured
+    for the 627-row filtered view at 2026-09-30)."""
     case = " ".join(
         f"WHEN '{label}' THEN {i}" for i, label in enumerate(LABEL_PRIORITY)
     )
@@ -117,9 +187,47 @@ def fetch_watchlist(
     if labels:
         params.extend(labels)
     params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def fetch_watchlist(
+    path: Path,
+    as_of: str | None,
+    labels: list[str] | None,
+    limit: int,
+) -> tuple[str | None, list[dict]]:
+    """Return (effective as_of, rows) for one as-of.
+
+    Rows are full rollup rows, in hot-first label-priority order as a
+    first pass (see config.LABEL_PRIORITY), then by dyad for a
+    deterministic order within a label. With no as_of, the latest
+    as-of in the DB is used. An as-of with no rows returns an empty
+    list, not an error: an empty watchlist is a legitimate answer.
+
+    Two paths, same payload and order (verified by equivalence
+    test, not by reasoning alone):
+    - When the requested set includes 'insufficient' (or no labels
+      are given, i.e. all labels): the two-step scan path. The
+      single-query form materializes the whole as-of slice
+      (26,030 rows at 2026-09-30, 36s measured) before LIMIT;
+      the scan path stops after the first priority group's first
+      ``limit`` keys (0.10s measured unfiltered).
+    - Otherwise (e.g. the default filtered view, 627 rows): the
+      original single-query path, which is already fast there
+      (2.8s measured) and avoids a full-index scan for sparse
+      first groups (the scan would take ~14s to find 30 hot rows).
+    """
+    effective = as_of if as_of is not None else latest_as_of(path)
+    if effective is None:
+        return None, []
+    wanted = [lab for lab in LABEL_PRIORITY if not labels or lab in labels]
     with _connect(path) as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return effective, [_row_to_dict(r) for r in rows]
+        if "insufficient" in wanted:
+            keys = _watchlist_scan_keys(conn, effective, wanted, limit)
+            return effective, _fetch_rows_by_keys(conn, keys, effective)
+        return effective, _fetch_watchlist_sorted(
+            conn, effective, labels, limit)
 
 
 def fetch_history(path: Path, iso1: str, iso2: str) -> list[dict]:

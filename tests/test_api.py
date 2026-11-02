@@ -296,6 +296,33 @@ def test_watchlist_limit_and_label_filter(client: TestClient) -> None:
     assert rows[0]["iso2"] == "IRN"
 
 
+def test_watchlist_scan_path_subset_and_truncation(client: TestClient) -> None:
+    # Scan path (requested set includes insufficient): subset order
+    # follows LABEL_PRIORITY, not the request order, and truncation
+    # cuts across groups in that order.
+    resp = client.get(
+        "/watchlist",
+        params={"as_of": "2026-09-30", "labels": "hot,insufficient", "limit": 2},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["data"]["rows"]
+    assert [(r["iso1"], r["iso2"], r["label"]) for r in rows] == [
+        ("USA", "MEX", "insufficient"),
+        ("USA", "IRN", "hot"),
+    ]
+    # Single-query path (no insufficient in the set): same order rule.
+    resp = client.get(
+        "/watchlist",
+        params={"as_of": "2026-09-30", "labels": "drifting,hot"},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["data"]["rows"]
+    assert [(r["iso1"], r["iso2"], r["label"]) for r in rows] == [
+        ("USA", "IRN", "hot"),
+        ("USA", "CAN", "drifting"),
+    ]
+
+
 def test_watchlist_latest_as_of_when_omitted(client: TestClient) -> None:
     resp = client.get("/watchlist")
     assert resp.status_code == 200
