@@ -977,6 +977,59 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/lc/hybrid", response_model=None)
+    def lc_hybrid(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # Hybrid forecast (O1: F2, 60-day, multi-origin) over DDA
+        # daily joints. Same LC_DEV provenance and version gate as
+        # the other /lc/ endpoints; needs the DDA sidecar plus the
+        # simplex list, and the rollup only for the effective-as-of
+        # rule (LC-07 fallback applies without it). Unknown dyads
+        # and short histories return 200 with a status payload,
+        # never 404.
+        from . import hybrid_store
+
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if dda is None or simplexes_p is None:
+            return _lc_missing(
+                provenance,
+                "LC DEV ONLY — no usable DDA sidecar: set DDA_SQLITE "
+                "and DDA_SIMPLEXES_JSON (mapped code list).",
+            )
+        try:
+            rollup_conn = None
+            rollup_path = config.rollup_path()
+            if rollup_path is not None and rollup_path.exists():
+                try:
+                    rollup_conn = lc_store.connect(rollup_path)  # type: ignore[arg-type]
+                except sqlite3.Error:
+                    rollup_conn = None
+            conn = lc_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                simplexes = dev_dda_store.load_simplexes(simplexes_p)  # type: ignore[arg-type]
+                data = hybrid_store.fetch_hybrid(
+                    rollup_conn, conn, simplexes, iso1, iso2, as_of)
+            finally:
+                conn.close()
+                if rollup_conn is not None:
+                    rollup_conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     return app
 
 
