@@ -585,6 +585,74 @@ def create_app() -> FastAPI:
             {**header, "sidecar": meta, "rows": rows},
         )
 
+    @app.get("/dev/country-aggregates", response_model=None)
+    def dev_country_aggregates(
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # DEV ONLY: per-country rollup aggregates + country
+        # polygons for the Context choropleth (Dan, 2026-11-03:
+        # week-over-week volume change, log10 volume, p75
+        # temperature, sufficient-only modal label,
+        # share_flagged). Needs the rollup AND the mirror
+        # (polygons); either unset means 503, same discipline
+        # as the other dev endpoints. Same version gate.
+        from . import country_store
+
+        rollup = config.rollup_path()
+        mirror = config.mirror_path()
+        if rollup is None or mirror is None:
+            missing = [
+                n
+                for n, p in (("ROLLUP_SQLITE", rollup),
+                             ("MIRROR_SQLITE", mirror))
+                if p is None
+            ]
+            provenance = Provenance(
+                source="dev",
+                message="DEV ONLY — not part of the v1 contract. "
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+            warnings, error = _version_gate(provenance, api_version)
+            if error is not None:
+                return error
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+        provenance = Provenance(
+            source="dev",
+            message="DEV ONLY — not part of the v1 contract.",
+        )
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if not rollup.exists() or not mirror.exists():
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                "Configured rollup or mirror file not found.",
+            )
+        try:
+            rconn = country_store.connect(rollup)
+            try:
+                mconn = country_store.connect(mirror)
+                try:
+                    data = country_store.fetch_country_aggregates(
+                        rconn, mconn, as_of)
+                finally:
+                    mconn.close()
+            finally:
+                rconn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup or mirror: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     # ------------------------------------------------------------------
     # DEV ONLY — Look-Closer endpoints (Waves 1-2, /lc/ prefix).
     # NOT part of the v1 contract: do not build frontend features

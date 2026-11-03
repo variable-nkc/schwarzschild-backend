@@ -127,6 +127,20 @@ def dda_simplexes_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+def mirror_path() -> Path | None:
+    """Return the configured mirror sqlite path, or None.
+
+    DEV ONLY: the choropleth endpoint reads country polygons
+    from the mirror's gdelt_codes_country table (bounding_box).
+    The mirror is a third delivery data source (after rollup
+    and DDA sidecar); unset means the choropleth endpoint 503s.
+    The polygons are GDELT's own shapes, so the map join is on
+    GDELT iso codes directly — no ISO-numeric mapping.
+    """
+    raw = os.getenv("MIRROR_SQLITE", "").strip()
+    return Path(raw) if raw else None
+
+
 def version_mode() -> str:
     """Return 'strict' or 'warn', defaulting to strict (fail closed).
 
