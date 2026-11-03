@@ -1,26 +1,22 @@
-"""F2 regime forecast with multi-origin mixture, ported from the PoC.
+"""F2 regime forecast with multi-origin mixture, vendored from the PoC.
 
 Provenance: ``dan/poc`` @ ``15b0e41``, ``src/seqbayes/forecast.py``
 (``f2_regime``, ``forecast_from_arrays`` F2 branch) and
 ``src/seqbayes/geometry.py`` (``ilr_basis``/``ilr``/``ilr_inv``).
-Same formulas, reimplemented in stdlib-only Python — the backend
-venv carries no numpy (see requirements.txt), and Dan's pickup is
-pull-and-restart with no pip step, so no new dependency is added.
-Do not "improve" the math here — improvements belong in the PoC,
-and this module is re-ported from there.
+Copied verbatim (numpy) except for the restriction noted below;
+do not "improve" the math here — improvements belong in the PoC,
+and this module is re-vendored from there.
 
-Two deliberate deltas from the PoC code, both documented, neither
-a formula change:
-- WLS trend is degree 1, so the lstsq fit is replaced by its
-  closed form (identical solution for a line).
-- MC draws for simplex quantiles use ``random.Random(0).gauss``
-  instead of numpy's ``default_rng(0)`` — a different RNG stream,
-  so quantiles differ from a PoC run by Monte Carlo noise only
-  (same 500 draws, same seed concept).
-
-Restriction: only the F2 rung is ported. The PoC ladder's F0/F1/F3
+Restriction: only the F2 rung is vendored. The PoC ladder's F0/F1/F3
 rungs are omitted deliberately — O1 pins F2, and a port that
 silently offered other models would reopen a closed decision.
+
+Dependency note (Dan, 2026-11-03): mainstream packages are
+available for this work — numpy is a backend dependency
+(requirements.txt), and ``pip install -r requirements.txt``
+before restart is part of pickup. An earlier stdlib-only port
+of this module was replaced on Dan's instruction; do not
+revert to it.
 
 What the workflow port changes (and ONLY this):
 - Input series: the PoC runs F2 on the latent ILR trajectory from
@@ -52,8 +48,7 @@ lists the origins actually used.
 
 from __future__ import annotations
 
-import math
-import random
+import numpy as np
 
 DEFAULTS = {
     "trend_window": 90,
@@ -70,101 +65,62 @@ HYBRID_HORIZON = 60
 HYBRID_ORIGINS = [0, 7, 15, 30, 45]
 
 
-def _closure(row: list[float]) -> list[float]:
-    s = sum(row)
-    return [v / s for v in row]
+def _closure(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    return x / x.sum(axis=-1, keepdims=True)
 
 
-def _median(vals: list[float]) -> float:
-    s = sorted(vals)
-    n = len(s)
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
-    s = sum(row)
-    return [v / s for v in row]
-
-
-def ilr_basis(d: int) -> list[list[float]]:
+def ilr_basis(d: int) -> np.ndarray:
     """Default orthonormal ILR basis (d, d-1) via Helmert contrasts."""
-    helm = [[0.0] * (d - 1) for _ in range(d)]
+    helm = np.zeros((d, d - 1))
     for j in range(d - 1):
-        for i in range(j + 1):
-            helm[i][j] = 1.0
-        helm[j + 1][j] = -(j + 1)
-    for j in range(d - 1):
-        norm = math.sqrt((j + 1) * (j + 2))
-        for i in range(d):
-            helm[i][j] /= norm
+        helm[: j + 1, j] = 1.0
+        helm[j + 1, j] = -(j + 1)
+    helm = helm / np.sqrt((np.arange(d - 1) + 1) * (np.arange(d - 1) + 2))
     return helm
 
 
-def _clr(row: list[float]) -> list[float]:
-    lx = [math.log(v) for v in row]
-    m = sum(lx) / len(lx)
-    return [v - m for v in lx]
+def _clr(x: np.ndarray) -> np.ndarray:
+    lx = np.log(x)
+    return lx - lx.mean(axis=-1, keepdims=True)
 
 
-def ilr(x: list[list[float]], v: list[list[float]] | None = None,
-        ) -> list[list[float]]:
-    """ILR transform: simplex rows (..., d) -> R^(d-1)."""
-    for row in x:
-        if any(val <= 0 for val in row):
-            raise ValueError(
-                "ilr: x must be strictly positive (zero-replace first)")
-    d = len(x[0])
+def ilr(x: np.ndarray, v: np.ndarray | None = None) -> np.ndarray:
+    """ILR transform: simplex (..., d) -> R^(d-1)."""
+    x = np.asarray(x, dtype=float)
+    if np.any(x <= 0):
+        raise ValueError("ilr: x must be strictly positive (zero-replace first)")
+    d = x.shape[-1]
     if v is None:
         v = ilr_basis(d)
-    out = []
-    for row in x:
-        c = _clr(row)
-        out.append([sum(c[i] * v[i][j] for i in range(d))
-                    for j in range(d - 1)])
-    return out
+    return _clr(x) @ v
 
 
-def ilr_inv(z: list[list[float]], v: list[list[float]] | None = None,
-            ) -> list[list[float]]:
-    """Inverse ILR: R^(d-1) rows -> simplex rows (..., d)."""
-    d = len(z[0]) + 1
+def ilr_inv(z: np.ndarray, v: np.ndarray | None = None) -> np.ndarray:
+    """Inverse ILR: R^(d-1) -> simplex (..., d)."""
+    z = np.asarray(z, dtype=float)
+    d = z.shape[-1] + 1
     if v is None:
         v = ilr_basis(d)
-    out = []
-    for row in z:
-        out.append(_closure(
-            [math.exp(sum(row[j] * v[i][j] for j in range(d - 1)))
-             for i in range(d)]))
-    return out
+    return _closure(np.exp(z @ v.T))
 
 
-def _check_history(n: int, need: int, what: str) -> None:
-    if n < need:
-        raise ValueError(f"{what}: need >= {need} days of history, got {n}")
+def _check_history(Z: np.ndarray, need: int, what: str) -> None:
+    if len(Z) < need:
+        raise ValueError(f"{what}: need >= {need} days of history, got {len(Z)}")
 
 
-def _wls_trend(Z: list[list[float]], w: list[float]):
-    """Weighted least squares line per ILR dim (closed form).
-
-    Returns (coef (2, d), resid_var (d,)) with the PoC's weight
-    normalization (wn sums to L) and dof = max(L - 2, 1).
-    """
-    L = len(Z)
-    d = len(Z[0])
-    wsum = sum(w)
-    wn = [wi / wsum * L for wi in w]
-    s = list(range(L))
-    sw = sum(wn[i] * s[i] for i in range(L)) / L
-    s_var = sum(wn[i] * (s[i] - sw) ** 2 for i in range(L))
-    coef = []
-    for j in range(d):
-        yw = sum(wn[i] * Z[i][j] for i in range(L)) / L
-        slope = (sum(wn[i] * (s[i] - sw) * (Z[i][j] - yw)
-                     for i in range(L)) / s_var) if s_var > 0 else 0.0
-        coef.append((yw - slope * sw, slope))
-    dof = max(L - 2, 1)
-    var = []
-    for j in range(d):
-        a, b = coef[j]
-        var.append(sum(wn[i] * (Z[i][j] - (a + b * s[i])) ** 2
-                       for i in range(L)) / dof)
+def _wls_trend(Z: np.ndarray, w: np.ndarray, degree: int = 1):
+    """Weighted least squares trend on trailing window."""
+    L, d = Z.shape
+    s = np.arange(L, dtype=float)
+    X = np.vander(s, degree + 1, increasing=True)
+    wn = w / w.sum() * L
+    sw = np.sqrt(wn)
+    coef, *_ = np.linalg.lstsq(X * sw[:, None], Z * sw[:, None], rcond=None)
+    resid = Z - X @ coef
+    dof = max(L - (degree + 1), 1)
+    var = (wn[:, None] * resid**2).sum(axis=0) / dof
     return coef, var
 
 
@@ -172,95 +128,78 @@ def _neff_scale(n_eff_now: float, n_eff_ref: float) -> float:
     """Inflate uncertainty when current information stock is thin."""
     if n_eff_ref <= 0:
         return 1.0
-    return min(max(n_eff_ref / max(n_eff_now, 1e-9), 1.0), 4.0)
+    return float(np.clip(n_eff_ref / max(n_eff_now, 1e-9), 1.0, 4.0))
 
 
-def _mat_pow_2x2(P: list[list[float]], h: int) -> list[list[float]]:
-    out = [[1.0, 0.0], [0.0, 1.0]]
-    for _ in range(h):
-        out = [[out[0][0] * P[0][0] + out[0][1] * P[1][0],
-                out[0][0] * P[0][1] + out[0][1] * P[1][1]],
-               [out[1][0] * P[0][0] + out[1][1] * P[1][0],
-                out[1][0] * P[0][1] + out[1][1] * P[1][1]]]
-    return out
-
-
-def _regime_states(Z: list[list[float]], p: dict):
+def _regime_states(Z: np.ndarray, p: dict):
     """Calm/agitated regimes from trailing volatility of ILR increments.
 
     Returns (regimes (T,) bool agitated, P (2,2) transition matrix,
     threshold used).
     """
     Wv = p["vol_window"]
-    step = [math.sqrt(sum((Z[i + 1][j] - Z[i][j]) ** 2
-                          for j in range(len(Z[0]))))
-            for i in range(len(Z) - 1)]
-    v = []
-    for i in range(len(step)):
-        window = step[max(0, i - Wv + 1): i + 1]
-        m = sum(window) / len(window)
-        v.append(math.sqrt(sum((x - m) ** 2 for x in window) / len(window)))
-    v = [v[0]] + v
+    step = np.linalg.norm(np.diff(Z, axis=0), axis=1)
+    v = np.array([step[max(0, i - Wv + 1): i + 1].std()
+                  for i in range(len(step))])
+    v = np.concatenate([[v[0]], v])
     Wr = min(p["regime_window"], len(v))
-    thr = _median(v[-Wr:])
-    agit = [x > thr for x in v]
-    r = [1 if a else 0 for a in agit[-Wr:]]
-    counts = [[1.0, 1.0], [1.0, 1.0]]
+    thr = np.median(v[-Wr:])
+    agit = v > thr
+    r = agit[-Wr:].astype(int)
+    counts = np.ones((2, 2))
     for a, b in zip(r[:-1], r[1:]):
-        counts[a][b] += 1
-    P = [[counts[i][j] / sum(counts[i]) for j in (0, 1)] for i in (0, 1)]
+        counts[a, b] += 1
+    P = counts / counts.sum(axis=1, keepdims=True)
     return agit, P, thr
 
 
 def f2_regime(
-    Z: list[list[float]],
-    w: list[float],
-    n_eff: list[float],
+    Z: np.ndarray,
+    w: np.ndarray,
+    n_eff: np.ndarray,
     horizons: list[int],
     p: dict,
 ) -> dict:
     """F2: 2-state Markov regime + per-regime F1 trends (mixture forecast)."""
     L = min(p["trend_window"], len(Z))
-    _check_history(len(Z), p["min_days"], "F2")
+    _check_history(Z, p["min_days"], "F2")
     agit, P, thr = _regime_states(Z, p)
-    r0 = 1 if agit[-1] else 0
+    r0 = int(agit[-1])
     reg = {}
     for r in (0, 1):
-        idx = [i for i in range(L)
-               if (not agit[-L + i] if r == 0 else agit[-L + i])]
+        idx = np.where(~agit[-L:] if r == 0 else agit[-L:])[0]
         if len(idx) < 10:
-            idx = list(range(L))
-        Zr = [Z[-L + i] for i in idx]
-        wr = [w[-L + i] if w[-L + i] > 0 else 1e-9 for i in idx]
-        reg[r] = _wls_trend(Zr, wr)
+            idx = np.arange(L)
+        Zr, wr = Z[-L:][idx], w[-L:][idx]
+        wr = np.where(wr <= 0, 1e-9, wr)
+        coef, rvar = _wls_trend(Zr, wr, degree=1)
+        reg[r] = (coef, rvar)
     tau = p["tau"] or L
-    scale_n = _neff_scale(n_eff[-1], _median(n_eff[-L:]))
+    scale_n = _neff_scale(n_eff[-1], np.median(n_eff[-L:]))
     s_last = L - 1
-    pi0 = [1.0, 0.0] if r0 == 0 else [0.0, 1.0]
+    pi0 = np.zeros(2)
+    pi0[r0] = 1.0
     out = {}
     for h in horizons:
-        Ph = _mat_pow_2x2(P, h)
-        pi_h = [pi0[0] * Ph[0][0] + pi0[1] * Ph[1][0],
-                pi0[0] * Ph[0][1] + pi0[1] * Ph[1][1]]
+        pi_h = pi0 @ np.linalg.matrix_power(P, h)
         mus, vars_ = [], []
         for r in (0, 1):
             coef, rvar = reg[r]
             s = s_last + h
-            mus.append([coef[j][0] + coef[j][1] * s
-                        for j in range(len(Z[0]))])
-            vars_.append([rv * (1.0 + h / tau) * scale_n for rv in rvar])
-        d = len(Z[0])
-        mu = [sum(pi_h[r] * mus[r][j] for r in (0, 1)) for j in range(d)]
-        var = [sum(pi_h[r] * (vars_[r][j] + (mus[r][j] - mu[j]) ** 2)
-                   for r in (0, 1)) for j in range(d)]
-        p_change = 1.0 - Ph[r0][r0]
+            mus.append(coef[0] + coef[1] * s)
+            vars_.append(rvar * (1.0 + h / tau) * scale_n)
+        mus = np.array(mus)
+        vars_ = np.array(vars_)
+        mu = (pi_h[:, None] * mus).sum(axis=0)
+        var = (pi_h[:, None] * (vars_ + (mus - mu) ** 2)).sum(axis=0)
+        p_change = 1.0 - float(np.linalg.matrix_power(P, h)[r0, r0])
         out[h] = {"mu": mu, "var": var, "p_change": p_change,
                   "regime_now": "agitated" if r0 else "calm",
-                  "regime_dist": pi_h}
+                  "regime_dist": pi_h.tolist()}
     return out
 
 
-def _simplex_quantiles(mu: list[float], var: list[float], p: dict):
+def _simplex_quantiles(mu: np.ndarray, var: np.ndarray, p: dict):
     """Predictive summaries on the simplex from ILR Gaussian params.
 
     path = predictive mean ilr_inv(mu) — a valid simplex, the point
@@ -268,28 +207,22 @@ def _simplex_quantiles(mu: list[float], var: list[float], p: dict):
     draws — MARGINAL predictive intervals for display. They are not
     joint compositional intervals and need not sum to 1.
     """
-    rng = random.Random(p["seed"])
-    draws = [[rng.gauss(mu[j], math.sqrt(max(var[j], 0.0)))
-              for j in range(len(mu))] for _ in range(p["n_samples"])]
+    rng = np.random.default_rng(p["seed"])
+    draws = rng.normal(
+        loc=mu, scale=np.sqrt(np.maximum(var, 0)),
+        size=(p["n_samples"], len(mu)))
     S = ilr_inv(draws)
-    # Columns of S are simplex components (5), NOT ILR dims (4):
-    # iterating over len(mu) here would silently drop the last
-    # component (caught live 2026-11-03 — zip had masked it).
-    d = len(S[0])
-    lower, upper = [], []
-    for j in range(d):
-        col = sorted(row[j] for row in S)
-        for q, acc in ((0.05, lower), (0.95, upper)):
-            pos = q * (len(col) - 1)
-            lo, hi = int(math.floor(pos)), int(math.ceil(pos))
-            acc.append(col[lo] + (col[hi] - col[lo]) * (pos - lo))
-    return {"path": ilr_inv([mu])[0], "lower": lower, "upper": upper}
+    return {
+        "path": ilr_inv(mu),
+        "lower": np.quantile(S, 0.05, axis=0),
+        "upper": np.quantile(S, 0.95, axis=0),
+    }
 
 
 def forecast_f2_multi_origin(
-    Z: list[list[float]],
-    w: list[float],
-    n_eff: list[float],
+    Z: np.ndarray,
+    w: np.ndarray,
+    n_eff: np.ndarray,
     horizon: int = HYBRID_HORIZON,
     origins: list[int] | None = None,
     params: dict | None = None,
@@ -305,6 +238,9 @@ def forecast_f2_multi_origin(
     """
     p = dict(DEFAULTS)
     p.update(params or {})
+    Z = np.asarray(Z, dtype=float)
+    w = np.asarray(w, dtype=float)
+    n_eff = np.asarray(n_eff, dtype=float)
     origins = sorted(set(int(o) for o in (origins if origins is not None
                                            else HYBRID_ORIGINS)))
     if any(o < 0 for o in origins):
@@ -326,27 +262,20 @@ def forecast_f2_multi_origin(
         per_origin[k] = raw
     if 0 not in per_origin:
         raise ValueError("no usable forecast origin (history too short)")
-    d = len(Z[0])
-    mus = [per_origin[k][horizon]["mu"] for k in per_origin]
-    vrs = [per_origin[k][horizon]["var"] for k in per_origin]
-    n = len(mus)
-    mu_bar = [sum(m[j] for m in mus) / n for j in range(d)]
-    var_bar = []
-    for j in range(d):
-        mean_var = sum(v[j] for v in vrs) / n
-        mean_mu = mu_bar[j]
-        var_mu = sum((m[j] - mean_mu) ** 2 for m in mus) / n
-        var_bar.append(mean_var + var_mu)
+    mus = np.array([per_origin[k][horizon]["mu"] for k in per_origin])
+    vrs = np.array([per_origin[k][horizon]["var"] for k in per_origin])
+    mu_bar = mus.mean(axis=0)
+    var_bar = vrs.mean(axis=0) + mus.var(axis=0)
     q = _simplex_quantiles(mu_bar, var_bar, p)
     leaf = {
-        "path": q["path"],
-        "lower": q["lower"],
-        "upper": q["upper"],
+        "path": q["path"].tolist(),
+        "lower": q["lower"].tolist(),
+        "upper": q["upper"].tolist(),
         "origins": sorted(per_origin),
         "origin_points": {
             str(k): _simplex_quantiles(
                 per_origin[k][horizon]["mu"],
-                per_origin[k][horizon]["var"], p)["path"]
+                per_origin[k][horizon]["var"], p)["path"].tolist()
             for k in per_origin},
     }
     for key in ("p_change", "regime_now", "regime_dist"):
