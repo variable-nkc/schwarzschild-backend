@@ -179,3 +179,52 @@ def test_hybrid_trend_invalid_is_400(hybrid_env: TestClient) -> None:
                   {"w_cap": -1}, {"w_alpha": -0.5}):
         r = hybrid_env.get("/lc/hybrid", params={**base, **extra})
         assert r.status_code == 400, extra
+
+
+def test_hybrid_trend_series(hybrid_env: TestClient) -> None:
+    """trend_series: posterior per history date, aligned by date.
+
+    Fixture AAA_BBB has 2 gap days (2026-06-01, 2026-08-15)
+    inside the last-180-day history window. Gap days carry a
+    posterior (carried forward from the previous day), so the
+    only nulls would be pre-first-data dates — and this
+    dyad's data starts before the history window, so none.
+    """
+    r = hybrid_env.get("/lc/hybrid",
+                       params={"iso1": "AAA", "iso2": "BBB",
+                               "as_of": "2026-09-30"})
+    data = r.json()["data"]
+    assert data["status"] == "ok"
+    ts = data["trend_series"]
+    hist = data["history"]
+    assert len(ts) == len(hist) == 180
+    assert [row["date"] for row in ts] == [row["date"] for row in hist]
+    by_date = {row["date"]: row for row in ts}
+    # Every trend row is a simplex (gap rows included).
+    for row in ts:
+        assert sum(row[p] for p in ("p1", "p2", "p3", "p4", "p5")) == \
+            pytest.approx(1.0)
+    # Gap days carry the previous day's posterior forward.
+    for gap, prev in (("2026-06-01", "2026-05-31"),
+                      ("2026-08-15", "2026-08-14")):
+        assert by_date[gap]["p1"] is not None
+        assert by_date[gap]["p1"] == pytest.approx(by_date[prev]["p1"])
+    # The trend is not the raw joints echoed back.
+    assert any(abs(t["p1"] - h["p1"]) > 1e-9
+               for t, h in zip(ts, hist) if h["p1"] is not None)
+
+
+def test_hybrid_trend_series_moves_with_params(
+        hybrid_env: TestClient) -> None:
+    """The (3) fix at the backend level: a different half-life
+    yields a different trend series (the displayed line moves
+    with the Trend inputs, not just the forecast point)."""
+    base = {"iso1": "AAA", "iso2": "BBB", "as_of": "2026-09-30"}
+    ts7 = hybrid_env.get("/lc/hybrid", params=base).json()["data"][
+        "trend_series"]
+    ts30 = hybrid_env.get(
+        "/lc/hybrid", params={**base, "half_life": 30}).json()["data"][
+        "trend_series"]
+    assert [row["date"] for row in ts7] == [row["date"] for row in ts30]
+    assert any(abs(a["p1"] - b["p1"]) > 1e-9
+               for a, b in zip(ts7, ts30) if a["p1"] is not None)

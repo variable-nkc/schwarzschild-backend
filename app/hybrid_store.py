@@ -29,6 +29,12 @@ response so the figure can caption them):
   returns status "insufficient_history" (HTTP 200, never 404) —
   the figure shows a notice, not a crash. Unknown dyads return
   status "no_data" the same way.
+- Response also carries trend_series: the sequential-Bayesian
+  posterior per history date (same dates as history, aligned by
+  date not position; nulls only before the first observed
+  joint). The R&D figure draws its history lines from
+  trend_series, so the lines move with the Trend inputs. Raw
+  history stays as input documentation.
 """
 
 from __future__ import annotations
@@ -126,6 +132,21 @@ def fetch_hybrid(
     trend = hybrid_forecast.sequential_posteriors(
         daily, np.array(vols, dtype=float), half_life_days,
         w_cap=(w_cap if w_cap > 0 else None), w_alpha=w_alpha)
+    # trend_series: the posterior per HISTORY date, aligned by
+    # date (not position — the trimmed series can be shorter
+    # than the window when the dyad's data starts late). Gap
+    # days inside the series carry a posterior (carried
+    # forward), so only pre-first-data dates are null.
+    post_by_date = {d: trend["posterior"][i]
+                    for i, d in enumerate(dates)}
+    trend_series = [
+        {"date": h["date"],
+         **({p: float(post_by_date[h["date"]][j])
+             for j, p in enumerate(PHASES)}
+            if h["date"] in post_by_date
+            else {p: None for p in PHASES})}
+        for h in history
+    ]
     try:
         leaf = hybrid_forecast.forecast_multi_origin(
             model,
@@ -164,6 +185,7 @@ def fetch_hybrid(
         "p_change": leaf.get("p_change"),
         "regime_dist": leaf.get("regime_dist"),
         "history": history,
+        "trend_series": trend_series,
         "series": {"n_days": len(dates), "n_filled": n_filled,
                    "first_date": dates[0], "last_date": dates[-1]},
     }
