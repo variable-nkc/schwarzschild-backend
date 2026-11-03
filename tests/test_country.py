@@ -204,3 +204,89 @@ def test_simplify_ring_keeps_endpoints_and_reduces() -> None:
     simple3 = country_store.simplify_ring(ring3, tol=0.0)
     assert simple3[1] == [1.123, 2.654]
     print("PASS: simplify_ring endpoints, reduction, rounding")
+
+
+def test_rewind_ring_orientation() -> None:
+    """2026-11-03 choropleth blob: a reversed ring renders
+    in d3-geo as the sphere minus the polygon. Exteriors
+    must come out positive-area, holes negative-area,
+    closure preserved, antimeridian rings untouched when
+    already positive."""
+    from app import country_store
+
+    # Vietnam's island triangle, verbatim from the served
+    # payload: negative spherical area, rendered as a
+    # world-covering complement until rewound.
+    tri = [[106.211, 9.621], [106.284, 9.544],
+           [106.093, 9.761], [106.211, 9.621]]
+    assert country_store._spherical_signed_area(tri) < 0
+    fixed = country_store._rewind_ring(tri, exterior=True)
+    assert country_store._spherical_signed_area(fixed) > 0
+    assert fixed[0] == fixed[-1] == tri[0]
+    assert sorted(map(tuple, fixed)) == sorted(map(tuple, tri))
+    # A hole wound the exterior way flips the other way:
+    # this square traverses clockwise (spherical area
+    # positive), so as a hole it reverses to negative.
+    hole = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0],
+            [0.0, 0.0]]
+    assert country_store._spherical_signed_area(hole) > 0
+    fixed_hole = country_store._rewind_ring(hole, exterior=False)
+    assert country_store._spherical_signed_area(fixed_hole) < 0
+    # An already-positive exterior is left alone, including
+    # an antimeridian-crossing ring (longitude differences
+    # wrap, so the jump does not flip the sign). This ring
+    # traverses clockwise once unwrapped.
+    anti = [[179.0, 10.0], [179.0, 12.0], [-179.0, 12.0],
+            [-179.0, 10.0], [179.0, 10.0]]
+    assert country_store._spherical_signed_area(anti) > 0
+    assert country_store._rewind_ring(anti, exterior=True) == anti
+
+
+def test_degenerate_triangle_dropped() -> None:
+    """2026-11-03: a collinear Norwegian island triangle
+    (one vertex on the segment between the other two)
+    rendered in d3-geo as the whole sphere, painting the
+    Context oceans orange even after the rewind. Such
+    rings are dropped; genuine small triangles survive."""
+    import sqlite3
+
+    from app import country_store
+
+    # Norway poly 19, verbatim from the served payload.
+    nor_tri = [[12.734, 65.976], [12.904, 66.015],
+               [12.369, 65.892], [12.734, 65.976]]
+    assert country_store._is_degenerate_triangle(nor_tri)
+    # Vietnam's island triangle: small but real.
+    vnm_tri = [[106.211, 9.621], [106.093, 9.761],
+               [106.284, 9.544], [106.211, 9.621]]
+    assert not country_store._is_degenerate_triangle(vnm_tri)
+    # A repeated vertex is degenerate too.
+    dup = [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+    assert country_store._is_degenerate_triangle(dup)
+    # Larger rings are never dropped by this test, even
+    # with a sharp vertex (fjord detail, not degeneracy).
+    coast = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.01],
+             [2.0, 0.0], [0.0, 0.0]]
+    assert not country_store._is_degenerate_triangle(coast)
+
+    # End to end through _load_geometry: a feature whose
+    # only ring is degenerate disappears; a feature with
+    # a genuine triangle keeps it.
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE gdelt_codes_country"
+                " (iso_code TEXT, full_name TEXT,"
+                "  polygon_type TEXT, bounding_box TEXT)")
+    nor_box = ("{[[[12.734,65.976],[12.904,66.015],"
+               "[12.369,65.892],[12.734,65.976]]]}")
+    vnm_box = ("{[[[106.211,9.621],[106.093,9.761],"
+               "[106.284,9.544],[106.211,9.621]]]}")
+    con.execute("INSERT INTO gdelt_codes_country VALUES"
+                " ('NOR', 'Norway', 'MultiPolygon', ?)", (nor_box,))
+    con.execute("INSERT INTO gdelt_codes_country VALUES"
+                " ('VNM', 'Vietnam', 'MultiPolygon', ?)", (vnm_box,))
+    country_store._GEOMETRY_CACHE.clear()
+    feats = country_store._load_geometry(con)
+    ids = [f["id"] for f in feats]
+    assert "NOR" not in ids
+    assert "VNM" in ids
+    country_store._GEOMETRY_CACHE.clear()

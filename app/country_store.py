@@ -47,6 +47,16 @@ geometry is cached in-process keyed by a fingerprint of
 the codes table (row count, non-null count, total box
 bytes), so the mirror can change without a stale cache
 and tests with different fixtures never leak geometry.
+Rings are also rewound to the orientation d3-geo reads
+(exteriors positive spherical area, holes negative):
+GDELT's table mixes windings, and a reversed ring renders
+in d3 as the sphere minus the polygon — on 2026-11-03
+eight features carried one, Vietnam's drawn last, so its
+complement painted the whole Context map one color.
+Degenerate triangles (vertices collinear, enclosing no
+area) are dropped outright: d3 renders those as the
+sphere too, and one Norwegian island triangle survived
+the rewind to keep the oceans orange until it was cut.
 First request per fingerprint pays the simplification;
 later requests pay only the aggregation. If the mirror
 ever changes shape materially, the tolerance lives here.
@@ -167,6 +177,68 @@ def simplify_ring(ring: list, tol: float = SIMPLIFY_TOL_DEG) -> list:
             for i, (x, y) in enumerate(ring) if keep[i]]
 
 
+def _spherical_signed_area(ring: list) -> float:
+    """Chamberlain-Duquette signed spherical area. Longitude
+    differences wrap to [-180, 180], so antimeridian rings
+    measure correctly. Sign convention verified against the
+    renderer (2026-11-03): a positive area renders as the
+    polygon itself in d3-geo; a negative area renders as
+    the sphere minus the polygon."""
+    total = 0.0
+    for (lon1, lat1), (lon2, lat2) in zip(ring, ring[1:]):
+        dlon = math.radians(((lon2 - lon1 + 180.0) % 360.0) - 180.0)
+        total += dlon * (2.0 + math.sin(math.radians(lat1))
+                         + math.sin(math.radians(lat2)))
+    return total / 2.0
+
+
+def _rewind_ring(ring: list, exterior: bool) -> list:
+    """Orient one ring the way d3-geo reads it: exteriors
+    positive area, holes negative. GDELT's table mixes
+    windings — on 2026-11-03 eight features carried a
+    reversed ring (Vietnam's tiny island triangle among
+    them); drawn last, its complement painted the whole
+    Context map one color. Reversal preserves closure: a
+    closed ring reversed still starts and ends on the same
+    point."""
+    area = _spherical_signed_area(ring)
+    if (exterior and area < 0) or (not exterior and area > 0):
+        return list(reversed(ring))
+    return ring
+
+
+def _is_degenerate_triangle(ring: list) -> bool:
+    """True for a 4-point ring (triangle + closure) whose
+    vertices are collinear: the ring encloses no area, so
+    d3-geo renders it as the sphere, painting the whole
+    map its color (2026-11-03: one such Norwegian island
+    triangle survived the rewind and kept the Context
+    oceans orange). Smallest-angle sine below 0.01
+    (~0.6 degrees) counts as collinear — genuine small
+    triangles (smallest sine ~0.05, e.g. Vietnam's island)
+    survive by a wide margin. Only triangles are tested:
+    a sharp vertex in a larger ring is legitimate
+    coastline detail, not a degenerate ring."""
+    if len(ring) != 4:
+        return False
+    pts = ring[:3]
+    min_sin = 1.0
+    for i in range(3):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % 3]
+        cx, cy = pts[(i + 2) % 3]
+        v1 = (bx - ax, by - ay)
+        v2 = (cx - ax, cy - ay)
+        n1 = math.hypot(*v1)
+        n2 = math.hypot(*v2)
+        if n1 == 0 or n2 == 0:
+            return True
+        min_sin = min(
+            min_sin,
+            abs(v1[0] * v2[1] - v1[1] * v2[0]) / (n1 * n2))
+    return min_sin < 0.01
+
+
 def _geometry_fingerprint(mirror_conn: sqlite3.Connection) -> tuple:
     row = mirror_conn.execute(
         "SELECT COUNT(*), COUNT(bounding_box),"
@@ -192,12 +264,15 @@ def _load_geometry(mirror_conn: sqlite3.Connection) -> list:
         simplified = []
         for polygon in coords:
             rings = []
-            for ring in polygon:
+            for ring_index, ring in enumerate(polygon):
                 if len(ring) < 2:
                     continue
                 simple = simplify_ring(ring)
                 if len(simple) >= 4:
-                    rings.append(simple)
+                    fixed = _rewind_ring(simple, ring_index == 0)
+                    if _is_degenerate_triangle(fixed):
+                        continue
+                    rings.append(fixed)
             if rings:
                 simplified.append(rings)
         if not simplified:
