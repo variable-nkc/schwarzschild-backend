@@ -1274,8 +1274,14 @@ def fetch_lc09(
         (r["iso1"], r["iso2"]) for r in peer_rows
     }
     temps_by_dyad: dict[tuple[str, str], list] = {}
+    # INDEXED BY is load-bearing, as on the peer slice above:
+    # with idx_peak_v7d (iso1, iso2, v_7d) present, the planner
+    # picks it for this iso1-only query and fetches every USA
+    # table row to check as_of (0.24s measured); the dyad index
+    # checks as_of from the index itself (0.05s measured).
     for r in conn.execute(
         "SELECT iso1, iso2, temperature FROM dyad_status_rollup "
+        "INDEXED BY idx_rollup_dyad "
         "WHERE iso1 = ? AND as_of < ? AND as_of >= date(?, '-45 days') "
         "ORDER BY as_of DESC",
         (iso1, effective, effective),
