@@ -126,3 +126,29 @@ def test_hybrid_unknown_dyad(hybrid_env: TestClient) -> None:
                                "as_of": "2026-09-30"})
     assert r.status_code == 200
     assert r.json()["data"]["status"] == "no_data"
+
+
+@pytest.mark.parametrize("model", ["F0p", "F0m", "F1"])
+def test_hybrid_model_selectable(hybrid_env: TestClient, model: str) -> None:
+    r = hybrid_env.get("/lc/hybrid",
+                       params={"iso1": "AAA", "iso2": "BBB",
+                               "as_of": "2026-09-30", "model": model})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["status"] == "ok"
+    assert data["model"] == model and data["horizon"] == 60
+    assert len(data["path"]) == 5
+    assert len(data["lower"]) == 5 and len(data["upper"]) == 5
+    assert sum(data["path"]) == pytest.approx(1.0)
+    for lo, path, hi in zip(data["lower"], data["path"], data["upper"]):
+        assert lo <= path <= hi
+    # Regime extras are F2-only: non-F2 leaves carry nulls, never
+    # a stale regime call.
+    assert data["regime_now"] is None and data["p_change"] is None
+
+
+def test_hybrid_model_unknown_is_400(hybrid_env: TestClient) -> None:
+    r = hybrid_env.get("/lc/hybrid",
+                       params={"iso1": "AAA", "iso2": "BBB",
+                               "as_of": "2026-09-30", "model": "F3"})
+    assert r.status_code == 400

@@ -49,8 +49,17 @@ def fetch_hybrid(
     iso1: str,
     iso2: str,
     as_of: str | None,
+    model: str = hybrid_forecast.HYBRID_MODEL,
 ) -> dict:
-    """F2 / 60-day / multi-origin forecast for one dyad."""
+    """Hybrid forecast for one dyad: model / 60-day / multi-origin.
+
+    Model defaults to F2 (O1 pin); F0p/F0m/F1 selectable. F3 is
+    not offered (no uniqueness series). Unknown model raises
+    ValueError before any DB work — the route turns it into
+    a 400, not a 503.
+    """
+    if model not in hybrid_forecast.HYBRID_MODELS:
+        raise ValueError(f"unknown hybrid model: {model!r}")
     effective = None
     if rollup_conn is not None:
         effective = lc_store.resolve_rollup_as_of(
@@ -96,7 +105,8 @@ def fetch_hybrid(
     series_rows = [[joints[i][p] for p in PHASES]
                    for i in range(len(joints))]
     try:
-        leaf = hybrid_forecast.forecast_f2_multi_origin(
+        leaf = hybrid_forecast.forecast_multi_origin(
+            model,
             hybrid_forecast.ilr(series_rows), vols, vols,
             hybrid_forecast.HYBRID_HORIZON,
             hybrid_forecast.HYBRID_ORIGINS)
@@ -104,6 +114,7 @@ def fetch_hybrid(
         return {"status": "insufficient_history",
                 "dyad": f"{iso1}_{iso2}", "as_of": window_end,
                 "requested_as_of": as_of, "detail": str(exc),
+                "model": model,
                 "n_days": len(dates),
                 "required_days": hybrid_forecast.HYBRID_HORIZON + 20}
     end = date.fromisoformat(window_end)
@@ -115,7 +126,7 @@ def fetch_hybrid(
         "dyad": f"{iso1}_{iso2}",
         "as_of": window_end,
         "requested_as_of": as_of,
-        "model": hybrid_forecast.HYBRID_MODEL,
+        "model": model,
         "horizon": hybrid_forecast.HYBRID_HORIZON,
         "origins": leaf["origins"],
         "origin_targets": targets,
@@ -124,9 +135,9 @@ def fetch_hybrid(
         "path": leaf["path"],
         "lower": leaf["lower"],
         "upper": leaf["upper"],
-        "regime_now": leaf["regime_now"],
-        "p_change": leaf["p_change"],
-        "regime_dist": leaf["regime_dist"],
+        "regime_now": leaf.get("regime_now"),
+        "p_change": leaf.get("p_change"),
+        "regime_dist": leaf.get("regime_dist"),
         "history": history,
         "series": {"n_days": len(dates), "n_filled": n_filled,
                    "first_date": dates[0], "last_date": dates[-1]},

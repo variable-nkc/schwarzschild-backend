@@ -7,9 +7,12 @@ Copied verbatim (numpy) except for the restriction noted below;
 do not "improve" the math here — improvements belong in the PoC,
 and this module is re-vendored from there.
 
-Restriction: only the F2 rung is vendored. The PoC ladder's F0/F1/F3
-rungs are omitted deliberately — O1 pins F2, and a port that
-silently offered other models would reopen a closed decision.
+Restriction: only the F0p/F0m/F1/F2 rungs are vendored. F3 is
+excluded deliberately — it is uniqueness-gated and the workflow
+serves no per-day uniqueness series to gate on, so offering it
+would need new plumbing, not just a selector option. The
+endpoint default stays F2 (O1 pin); the other rungs are
+selectable on the R&D page only.
 
 Dependency note (Dan, 2026-11-03): mainstream packages are
 available for this work — numpy is a backend dependency
@@ -52,15 +55,19 @@ import numpy as np
 
 DEFAULTS = {
     "trend_window": 90,
+    "err_window": 180,
     "vol_window": 14,
     "regime_window": 180,
     "tau": None,
+    "quadratic": False,
+    "damp_tau": None,
     "n_samples": 500,
     "seed": 0,
     "min_days": 20,
 }
 
 HYBRID_MODEL = "F2"
+HYBRID_MODELS = ("F0p", "F0m", "F1", "F2")
 HYBRID_HORIZON = 60
 HYBRID_ORIGINS = [0, 7, 15, 30, 45]
 
@@ -153,6 +160,65 @@ def _regime_states(Z: np.ndarray, p: dict):
     return agit, P, thr
 
 
+def f0_persistence(Z: np.ndarray, horizons: list[int], p: dict) -> dict:
+    """F0p: flat forecast + empirical h-step error bars."""
+    _check_history(Z, max(horizons) + p["min_days"], "F0p")
+    mu = Z[-1].copy()
+    W = min(p["err_window"], len(Z) - max(horizons))
+    base = Z[-(W + max(horizons)):]
+    out = {}
+    for h in horizons:
+        errs = base[h:] - base[:-h]
+        out[h] = {"mu": mu, "var": errs.var(axis=0)}
+    return out
+
+
+def f0_mean(Z: np.ndarray, horizons: list[int], p: dict) -> dict:
+    """F0m: trailing-mean forecast + empirical h-step error bars."""
+    L = min(p["trend_window"], len(Z))
+    _check_history(Z, max(horizons) + L, "F0m")
+    mu = Z[-L:].mean(axis=0)
+    W = min(p["err_window"], len(Z) - max(horizons) - L + 1)
+    errs_all = []
+    for t in range(len(Z) - max(horizons) - W, len(Z) - max(horizons)):
+        m = Z[t - L + 1: t + 1].mean(axis=0)
+        errs_all.append(Z[t + 1: t + 1 + max(horizons)] - m)
+    errs_all = np.array(errs_all)  # (W, Hmax, d)
+    out = {}
+    for i, h in enumerate(horizons):
+        out[h] = {"mu": mu, "var": errs_all[:, i, :].var(axis=0)}
+    return out
+
+
+def f1_trend(
+    Z: np.ndarray,
+    w: np.ndarray,
+    n_eff: np.ndarray,
+    horizons: list[int],
+    p: dict,
+) -> dict:
+    """F1: weighted local linear (/damped quadratic) trend in ILR."""
+    L = min(p["trend_window"], len(Z))
+    _check_history(Z, p["min_days"], "F1")
+    Zw, ww = Z[-L:], w[-L:]
+    ww = np.where(ww <= 0, 1e-9, ww)
+    deg = 2 if p["quadratic"] else 1
+    coef, rvar = _wls_trend(Zw, ww, degree=deg)
+    tau = p["tau"] or L
+    damp_tau = p["damp_tau"] or L
+    s_last = L - 1
+    scale_n = _neff_scale(n_eff[-1], np.median(n_eff[-L:]))
+    out = {}
+    for h in horizons:
+        s = s_last + h
+        mu = coef[0] + coef[1] * s
+        if deg == 2:
+            mu = mu + coef[2] * s**2 / (1.0 + s / damp_tau)
+        var = rvar * (1.0 + h / tau) * scale_n
+        out[h] = {"mu": mu, "var": var}
+    return out
+
+
 def f2_regime(
     Z: np.ndarray,
     w: np.ndarray,
@@ -219,7 +285,8 @@ def _simplex_quantiles(mu: np.ndarray, var: np.ndarray, p: dict):
     }
 
 
-def forecast_f2_multi_origin(
+def forecast_multi_origin(
+    model: str,
     Z: np.ndarray,
     w: np.ndarray,
     n_eff: np.ndarray,
@@ -227,15 +294,21 @@ def forecast_f2_multi_origin(
     origins: list[int] | None = None,
     params: dict | None = None,
 ) -> dict:
-    """F2 at one horizon with the multi-origin stability mixture.
+    """One model rung at one horizon with the multi-origin mixture.
 
-    Returns the PoC leaf for the horizon: path/lower/upper (K,)
-    simplex summaries, origins actually used, per-origin simplex
-    points, and F2 extras (from the k=0 origin only).
+    Model is one of HYBRID_MODELS (F0p/F0m/F1/F2). F3 is NOT
+    offered: it is uniqueness-gated and the workflow serves no
+    per-day uniqueness series to gate on. Returns the PoC leaf
+    for the horizon: path/lower/upper (K,) simplex summaries,
+    origins actually used, per-origin simplex points, and — for
+    F2 only — regime_now/p_change/regime_dist from the k=0
+    origin.
 
     Raises ValueError when even the k=0 origin lacks the history
     the horizon needs (horizon + min_days days).
     """
+    if model not in HYBRID_MODELS:
+        raise ValueError(f"unknown hybrid model: {model!r}")
     p = dict(DEFAULTS)
     p.update(params or {})
     Z = np.asarray(Z, dtype=float)
@@ -254,7 +327,14 @@ def forecast_f2_multi_origin(
         wk = w[: len(w) - k] if k else w
         nk = n_eff[: len(n_eff) - k] if k else n_eff
         try:
-            raw = f2_regime(Zk, wk, nk, [horizon], p)
+            if model == "F2":
+                raw = f2_regime(Zk, wk, nk, [horizon], p)
+            elif model == "F1":
+                raw = f1_trend(Zk, wk, nk, [horizon], p)
+            elif model == "F0m":
+                raw = f0_mean(Zk, [horizon], p)
+            else:
+                raw = f0_persistence(Zk, [horizon], p)
         except ValueError:
             if k == 0:
                 raise
@@ -282,3 +362,16 @@ def forecast_f2_multi_origin(
         if key in per_origin[0][horizon]:
             leaf[key] = per_origin[0][horizon][key]
     return leaf
+
+
+def forecast_f2_multi_origin(
+    Z: np.ndarray,
+    w: np.ndarray,
+    n_eff: np.ndarray,
+    horizon: int = HYBRID_HORIZON,
+    origins: list[int] | None = None,
+    params: dict | None = None,
+) -> dict:
+    """F2-only wrapper around forecast_multi_origin (O1 default)."""
+    return forecast_multi_origin(
+        "F2", Z, w, n_eff, horizon, origins, params)
