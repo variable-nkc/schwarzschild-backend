@@ -152,3 +152,30 @@ def test_hybrid_model_unknown_is_400(hybrid_env: TestClient) -> None:
                        params={"iso1": "AAA", "iso2": "BBB",
                                "as_of": "2026-09-30", "model": "F3"})
     assert r.status_code == 400
+
+
+def test_hybrid_trend_defaults_and_params(hybrid_env: TestClient) -> None:
+    r = hybrid_env.get("/lc/hybrid",
+                       params={"iso1": "AAA", "iso2": "BBB",
+                               "as_of": "2026-09-30"})
+    data = r.json()["data"]
+    assert data["status"] == "ok"
+    assert data["trend"] == {"half_life_days": 7.0, "w_cap": 0.0,
+                             "w_alpha": 1.0}
+    r = hybrid_env.get("/lc/hybrid",
+                       params={"iso1": "AAA", "iso2": "BBB",
+                               "as_of": "2026-09-30", "half_life": 14,
+                               "w_cap": 500, "w_alpha": 0.5})
+    data = r.json()["data"]
+    assert data["status"] == "ok"
+    assert data["trend"] == {"half_life_days": 14.0, "w_cap": 500.0,
+                             "w_alpha": 0.5}
+    assert sum(data["path"]) == pytest.approx(1.0)
+
+
+def test_hybrid_trend_invalid_is_400(hybrid_env: TestClient) -> None:
+    base = {"iso1": "AAA", "iso2": "BBB", "as_of": "2026-09-30"}
+    for extra in ({"half_life": 0}, {"half_life": -3},
+                  {"w_cap": -1}, {"w_alpha": -0.5}):
+        r = hybrid_env.get("/lc/hybrid", params={**base, **extra})
+        assert r.status_code == 400, extra

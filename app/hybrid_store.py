@@ -15,13 +15,16 @@ response so the figure can caption them):
 - Effective as-of follows LC-07 exactly: the dyad's latest
   rollup as-of <= requested when a rollup row exists, else the
   requested date verbatim (or the latest DDA date when omitted).
-- Gap days (joint None) are forward-filled for the model only;
-  the raw history returned for display keeps the gaps as nulls.
-  Filled days carry weight ~0 in trend fits (their joint_volume
-  is 0), so the fill preserves daily spacing without pulling
-  trends. ``series.n_filled`` counts them.
-- Weights and information stock are both daily joint_volume
-  (see hybrid_forecast's header for why).
+- Input = the decayed sequential-Bayesian trend of the daily
+  DDA joints (PoC series.py/api.py): posterior S, effective
+  weights w_used, information stock N_eff. Gap days (joint
+  None, volume 0) are NOT filled for the model: they enter
+  as NaN rows with W = 0, which the trend ignores — the
+  posterior carries forward, N_eff decays. The raw history
+  returned for display keeps the gaps as nulls.
+  ``series.n_filled`` still counts gap days in the window.
+- Model triple is (ILR(S), w_used, N_eff), as in the PoC
+  pipeline — not (ILR(raw joints), vols, vols).
 - History too short for even the k=0 origin (60 + 20 = 80 days)
   returns status "insufficient_history" (HTTP 200, never 404) —
   the figure shows a notice, not a crash. Unknown dyads return
@@ -32,6 +35,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import sqlite3
+
+import numpy as np
 
 from . import dev_dda_store, hybrid_forecast, lc_store
 
@@ -50,16 +55,30 @@ def fetch_hybrid(
     iso2: str,
     as_of: str | None,
     model: str = hybrid_forecast.HYBRID_MODEL,
+    half_life_days: float = 7.0,
+    w_cap: float = 0.0,
+    w_alpha: float = 1.0,
 ) -> dict:
     """Hybrid forecast for one dyad: model / 60-day / multi-origin.
 
     Model defaults to F2 (O1 pin); F0p/F0m/F1 selectable. F3 is
-    not offered (no uniqueness series). Unknown model raises
-    ValueError before any DB work — the route turns it into
+    not offered (no uniqueness series). The model input is the
+    decayed sequential-Bayesian trend of the daily joints (PoC
+    series.py/api.py): posterior S, effective weights w_used,
+    information stock N_eff — not the raw joints. Defaults
+    (Dan, 2026-11-03): half-life 7 days, w_cap 0 (= uncapped,
+    the PoC UI convention), w_alpha 1. Bad params raise
+    ValueError before any DB work — the route turns them into
     a 400, not a 503.
     """
     if model not in hybrid_forecast.HYBRID_MODELS:
         raise ValueError(f"unknown hybrid model: {model!r}")
+    if half_life_days <= 0:
+        raise ValueError("half-life must be positive")
+    if w_cap < 0:
+        raise ValueError("day-weight cap must be non-negative")
+    if w_alpha < 0:
+        raise ValueError("day-weight exponent must be non-negative")
     effective = None
     if rollup_conn is not None:
         effective = lc_store.resolve_rollup_as_of(
@@ -72,27 +91,21 @@ def fetch_hybrid(
         return {"status": "no_data", "dyad": f"{iso1}_{iso2}",
                 "as_of": None, "requested_as_of": as_of}
     dates: list[str] = []
-    joints: list[dict | None] = []
+    raw: list[dict | None] = []
     vols: list[float] = []
     filled: list[bool] = []
-    last: dict | None = None
     for r in rows:
         dates.append(r["as_of"])
-        if r["joint"] is None:
-            joints.append(last)
-            filled.append(True)
-        else:
-            last = r["joint"]
-            joints.append(r["joint"])
-            filled.append(False)
+        raw.append(r["joint"])
+        filled.append(r["joint"] is None)
         vols.append(float(r["joint_volume"]))
-    first_known = next((i for i, j in enumerate(joints) if j is not None),
+    first_known = next((i for i, j in enumerate(raw) if j is not None),
                        None)
     if first_known is None:
         return {"status": "no_data", "dyad": f"{iso1}_{iso2}",
                 "as_of": window_end, "requested_as_of": as_of}
     dates = dates[first_known:]
-    joints = joints[first_known:]
+    raw = raw[first_known:]
     vols = vols[first_known:]
     filled = filled[first_known:]
     n_filled = sum(1 for f in filled if f)
@@ -102,12 +115,22 @@ def fetch_hybrid(
             else {p: None for p in PHASES})}
         for r in rows[-HISTORY_DAYS:]
     ]
-    series_rows = [[joints[i][p] for p in PHASES]
-                   for i in range(len(joints))]
+    # Model input: the sequential-Bayesian trend triple, not the
+    # raw joints. Gap days (joint None, volume 0) become NaN
+    # rows with W = 0, which sequential_posteriors ignores:
+    # the posterior carries forward, N_eff decays. No
+    # forward-fill is needed for the model input anymore.
+    daily = np.array(
+        [[j[p] for p in PHASES] if j is not None else [np.nan] * len(PHASES)
+         for j in raw], dtype=float)
+    trend = hybrid_forecast.sequential_posteriors(
+        daily, np.array(vols, dtype=float), half_life_days,
+        w_cap=(w_cap if w_cap > 0 else None), w_alpha=w_alpha)
     try:
         leaf = hybrid_forecast.forecast_multi_origin(
             model,
-            hybrid_forecast.ilr(series_rows), vols, vols,
+            hybrid_forecast.ilr(trend["posterior"]),
+            trend["weights"], trend["n_eff"],
             hybrid_forecast.HYBRID_HORIZON,
             hybrid_forecast.HYBRID_ORIGINS)
     except ValueError as exc:
@@ -128,6 +151,8 @@ def fetch_hybrid(
         "requested_as_of": as_of,
         "model": model,
         "horizon": hybrid_forecast.HYBRID_HORIZON,
+        "trend": {"half_life_days": half_life_days,
+                  "w_cap": w_cap, "w_alpha": w_alpha},
         "origins": leaf["origins"],
         "origin_targets": targets,
         "origin_points": leaf["origin_points"],

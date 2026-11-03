@@ -983,20 +983,26 @@ def create_app() -> FastAPI:
         iso2: str = Query(..., min_length=1),
         as_of: str | None = Query(default=None),
         model: str = Query(default="F2"),
+        half_life: float = Query(default=7.0),
+        w_cap: float = Query(default=0.0),
+        w_alpha: float = Query(default=1.0),
         api_version: str | None = Query(
             default=None,
             description="Expected payload contract version.",
         ),
     ) -> JSONResponse | dict:
         # Hybrid forecast (O1 default: F2, 60-day, multi-origin)
-        # over DDA daily joints. Model selectable (R&D page,
-        # 2026-11-03 feedback): F0p/F0m/F1/F2; F3 excluded — no
-        # uniqueness series to gate on. Same LC_DEV provenance
-        # and version gate as the other /lc/ endpoints; needs
-        # the DDA sidecar plus the simplex list, and the rollup
-        # only for the effective-as-of rule (LC-07 fallback
-        # applies without it). Unknown dyads and short histories
-        # return 200 with a status payload, never 404.
+        # over the sequential-Bayesian trend of the DDA daily
+        # joints (Dan, 2026-11-03: half-life 7d, cap 0 = uncapped,
+        # exponent 1 defaults; R&D page exposes all three).
+        # Model selectable (R&D page, 2026-11-03 feedback):
+        # F0p/F0m/F1/F2; F3 excluded — no uniqueness series to
+        # gate on. Same LC_DEV provenance and version gate as
+        # the other /lc/ endpoints; needs the DDA sidecar plus
+        # the simplex list, and the rollup only for the
+        # effective-as-of rule (LC-07 fallback applies without
+        # it). Unknown dyads and short histories return 200
+        # with a status payload, never 404.
         from . import hybrid_forecast, hybrid_store
 
         provenance, dda, simplexes_p = _lc_dda()
@@ -1008,6 +1014,21 @@ def create_app() -> FastAPI:
                 provenance, warnings, 400, "bad_model",
                 f"Unknown hybrid model {model!r}; expected one of "
                 f"{', '.join(hybrid_forecast.HYBRID_MODELS)}.",
+            )
+        if half_life <= 0:
+            return _fail(
+                provenance, warnings, 400, "bad_trend",
+                "half_life must be positive.",
+            )
+        if w_cap < 0:
+            return _fail(
+                provenance, warnings, 400, "bad_trend",
+                "w_cap must be non-negative (0 = uncapped).",
+            )
+        if w_alpha < 0:
+            return _fail(
+                provenance, warnings, 400, "bad_trend",
+                "w_alpha must be non-negative.",
             )
         if dda is None or simplexes_p is None:
             return _lc_missing(
@@ -1028,7 +1049,8 @@ def create_app() -> FastAPI:
                 simplexes = dev_dda_store.load_simplexes(simplexes_p)  # type: ignore[arg-type]
                 data = hybrid_store.fetch_hybrid(
                     rollup_conn, conn, simplexes, iso1, iso2, as_of,
-                    model=model)
+                    model=model, half_life_days=half_life,
+                    w_cap=w_cap, w_alpha=w_alpha)
             finally:
                 conn.close()
                 if rollup_conn is not None:

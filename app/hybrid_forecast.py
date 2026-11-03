@@ -22,12 +22,23 @@ of this module was replaced on Dan's instruction; do not
 revert to it.
 
 What the workflow port changes (and ONLY this):
-- Input series: the PoC runs F2 on the latent ILR trajectory from
-  the filter. The workflow has no latent series, so the port runs
-  F2 on ILR(daily DDA joints) — the observed daily composition.
-  That is a noisier input than the latent posterior, so regime
-  calls here are jumpier than the PoC's; the figure caption must
-  say the input is observed joints, not a latent forecast.
+- Input series: the PoC runs the ladder on ILR(latent posterior)
+  from the filter. The workflow has no latent series, so the
+  port runs it on ILR(decayed sequential-Bayesian posterior of
+  the daily DDA joints) — PoC ``series.py`` /
+  ``api.py`` exactly: S_T is the weighted geometric mean of the
+  decayed prior posterior and the new day's joint, decay lam
+  from the half-life (lam^h = 0.5), day weights
+  min(W, w_cap)^alpha, information stock N_eff accumulated
+  alongside. The model triple is (ILR(S), w_used, N_eff), as
+  in the PoC pipeline — not (ILR(raw joints), vols, vols).
+  Gap days (W = 0) carry the posterior forward unchanged
+  while N_eff decays; no forward-fill is needed for the model
+  input. Defaults (Dan, 2026-11-03): half-life 7 days,
+  w_cap 0 (= uncapped, the PoC UI convention), w_alpha 1.
+  The R&D page exposes all three; Look Closer uses defaults.
+  History lines still show the raw observed joints — the
+  captions must say the model fits the trend of that mix.
 - Day weights ``w`` and information stock ``n_eff``: the PoC takes
   them from the pipeline. The port uses daily joint_volume for
   both (days with more joint-able reports weigh more; uncertainty
@@ -283,6 +294,98 @@ def _simplex_quantiles(mu: np.ndarray, var: np.ndarray, p: dict):
         "lower": np.quantile(S, 0.05, axis=0),
         "upper": np.quantile(S, 0.95, axis=0),
     }
+
+
+def _zero_replace(x: np.ndarray, delta: float = 5e-3) -> np.ndarray:
+    """Multiplicative zero replacement, sum-to-1 preserved
+    (PoC geometry.multiplicative_zero_replace, verbatim)."""
+    x = np.asarray(x, dtype=float)
+    out = x.copy()
+    zero = out == 0
+    n_zero = zero.sum(axis=-1, keepdims=True)
+    out = np.where(zero, delta, out * (1.0 - n_zero * delta))
+    return _closure(out)
+
+
+def half_life_to_lam(half_life_days: float) -> float:
+    """Decay rate lam from half-life in days: lam^h = 0.5."""
+    if half_life_days <= 0:
+        raise ValueError("half-life must be positive")
+    return 0.5 ** (1.0 / half_life_days)
+
+
+def day_weights(
+    w_raw: np.ndarray,
+    w_cap: float | None = None,
+    w_alpha: float = 1.0,
+) -> np.ndarray:
+    """Effective per-day weights: w_T = min(W_T, w_cap)^alpha.
+    w_cap=None disables the cap (the PoC UI's 0 maps to None)."""
+    w = np.asarray(w_raw, dtype=float)
+    if np.any(w < 0):
+        raise ValueError("day_weights: W must be non-negative")
+    if w_cap is not None:
+        if w_cap <= 0:
+            raise ValueError("day_weights: w_cap must be positive")
+        w = np.minimum(w, w_cap)
+    if w_alpha != 1.0:
+        w = w**w_alpha
+    return w
+
+
+def sequential_posteriors(
+    daily: np.ndarray,
+    w_raw: np.ndarray,
+    half_life_days: float,
+    w_cap: float | None = None,
+    w_alpha: float = 1.0,
+    zero_delta: float = 5e-3,
+) -> dict:
+    """Decayed sequential Bayesian series (PoC series.py, verbatim
+    streaming version; the O(T^2) closed form is verification-only
+    and is not vendored).
+
+    Each day's posterior S_T is the weighted geometric mean of
+    the decayed prior posterior and the new day's daily joint
+    D_T, computed streaming in log-space (O(1) per day). Also
+    accumulates N_eff(T), the information stock behind today's
+    posterior. Rows with w_raw == 0 are ignored (may contain
+    NaNs): the posterior carries forward unchanged, N_eff
+    decays.
+    """
+    D = np.asarray(daily, dtype=float)
+    W = np.asarray(w_raw, dtype=float)
+    if D.ndim != 2 or W.ndim != 1 or D.shape[0] != W.shape[0]:
+        raise ValueError("shapes: daily (T,K), w_raw (T,)")
+    t, k = D.shape
+
+    lam = half_life_to_lam(half_life_days)
+    w = day_weights(W, w_cap=w_cap, w_alpha=w_alpha)
+
+    log_accum = np.zeros(k)
+    n_eff = 0.0
+    S = np.empty_like(D)
+    N = np.empty(t)
+
+    for i in range(t):
+        log_accum *= lam
+        n_eff *= lam
+        if w[i] > 0:
+            d = D[i]
+            if not np.all(np.isfinite(d)):
+                raise ValueError(
+                    f"non-finite daily simplex on day {i} with w>0")
+            d = _zero_replace(_closure(d), delta=zero_delta)
+            log_accum += w[i] * np.log(d)
+            n_eff += w[i]
+        if n_eff > 0:
+            v = log_accum / n_eff
+            S[i] = _closure(np.exp(v - v.max()))
+        else:
+            S[i] = np.full(k, 1.0 / k)
+        N[i] = n_eff
+
+    return {"posterior": S, "n_eff": N, "lam": lam, "weights": w}
 
 
 def forecast_multi_origin(
