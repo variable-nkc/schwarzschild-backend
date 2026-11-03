@@ -653,6 +653,82 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/health", response_model=None)
+    def dev_health(
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # DEV ONLY: overall system health for the Context page
+        # (Dan, 2026-11-03, as reviewed: rollup / DDA /
+        # poc_base subsections + cross-store block + trend
+        # series + provenance header). Needs all three stores
+        # (ROLLUP_SQLITE, DDA_SQLITE, MIRROR_SQLITE); any
+        # unset means 503, same discipline as the other dev
+        # endpoints. Same version gate. A store with no data
+        # at or before the as-of yields a no_data block, not
+        # a 404 — the section renders what exists.
+        from . import health_store
+
+        rollup = config.rollup_path()
+        dda = config.dda_path()
+        mirror = config.mirror_path()
+        if rollup is None or dda is None or mirror is None:
+            missing = [
+                n
+                for n, p in (("ROLLUP_SQLITE", rollup),
+                             ("DDA_SQLITE", dda),
+                             ("MIRROR_SQLITE", mirror))
+                if p is None
+            ]
+            provenance = Provenance(
+                source="dev",
+                message="DEV ONLY — not part of the v1 contract. "
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+            warnings, error = _version_gate(provenance, api_version)
+            if error is not None:
+                return error
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+        provenance = Provenance(
+            source="dev",
+            message="DEV ONLY — not part of the v1 contract.",
+        )
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if not rollup.exists() or not dda.exists() or not mirror.exists():
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                "Configured rollup, DDA, or mirror file not found.",
+            )
+        try:
+            rconn = health_store.connect(rollup)
+            try:
+                dconn = health_store.connect(dda)
+                try:
+                    mconn = health_store.connect(mirror)
+                    try:
+                        data = health_store.fetch_health(
+                            rconn, dconn, mconn, as_of)
+                    finally:
+                        mconn.close()
+                finally:
+                    dconn.close()
+            finally:
+                rconn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read rollup, DDA, or mirror: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     # ------------------------------------------------------------------
     # DEV ONLY — Look-Closer endpoints (Waves 1-2, /lc/ prefix).
     # NOT part of the v1 contract: do not build frontend features
