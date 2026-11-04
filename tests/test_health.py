@@ -187,10 +187,31 @@ def test_cross_store_block(health_env: TestClient):
     assert cross["poc_base_events"] == 5
     assert cross["volume_ratio"]["ratio"] == pytest.approx(0.6)
     assert cross["volume_ratio"]["baseline"] == pytest.approx(0.6)
+    assert cross["volume_ratio"]["deviation_pct"] == pytest.approx(0.0)
     assert cross["volume_ratio"]["icon"] == "green"
     assert cross["dyad_jaccard"]["ratio"] == pytest.approx(1.0)
+    assert cross["dyad_jaccard"]["deviation_pct"] == pytest.approx(0.0)
+    assert cross["dyad_jaccard"]["icon"] == "green"
     assert cross["intersection"] == 3
     assert cross["union"] == 3
+
+
+def test_cross_band_thresholds():
+    # Tight two-sided band (Dan, 2026-11-04): green within ±10%,
+    # yellow within ±25%, red beyond — on either side of baseline.
+    from app.health_store import (CROSS_BAND_GREEN_PCT,
+                                  CROSS_BAND_YELLOW_PCT, _band_icon)
+    band = lambda dev: _band_icon(dev, green=CROSS_BAND_GREEN_PCT,
+                                  yellow=CROSS_BAND_YELLOW_PCT)
+    assert band(0.0) == "green"
+    assert band(10.0) == "green"
+    assert band(-10.0) == "green"
+    assert band(10.1) == "yellow"
+    assert band(-15.0) == "yellow"
+    assert band(25.0) == "yellow"
+    assert band(25.1) == "red"
+    assert band(-100.0) == "red"
+    assert band(None) is None
 
 
 def test_freshness_icons(health_env: TestClient):

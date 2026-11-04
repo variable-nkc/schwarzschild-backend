@@ -79,14 +79,18 @@ Cross-store block (addition 1): volume ratio (DDA
 obs_count sum / poc_base event count on the common day
 — the latest day both stores cover) and dyad Jaccard
 (|intersection| / |union| of the day's DDA dyads and
-poc_base pairs), each against its same-weekday baseline
-with the same 90/75 icons. Measured exactly 1.0 / 1.0
-at 2026-09-30. KNOWN LIMIT (flagged to Dan at build):
-the percent is one-sided and capped at 100%, so a
+poc_base pairs), each against its same-weekday baseline,
+judged by the tight two-sided band below. Measured
+exactly 1.0 / 1.0 at 2026-09-30. ADOPTED (Dan,
+2026-11-04): the cross ratios use a two-sided deviation
+band, tighter than the label bands — green within ±10%
+of baseline, yellow within ±25%, red beyond — so a
 ratio ABOVE its baseline (e.g. a DDA double-count
-pushing the volume ratio to 2.0) reads 100% green and
-hides. A two-sided deviation band is the proposed fix,
-pending Dan's ruling — it is not silently implemented.
+pushing the volume ratio to 2.0) flags instead of
+reading 100% green. Evidence (measured 2026-11-04, VM
+stores, 92 days 2026-07-01..09-30): both ratios are
+exactly 1.0 every day, so the tighter band essentially
+never false-alarms on current data.
 
 Trend strips (addition 3): every count metric carries
 its series (baseline days + evaluation day, zeros for
@@ -128,6 +132,11 @@ GREEN_MIN_PCT = 90.0
 YELLOW_MIN_PCT = 75.0
 BAND_GREEN_PCT = 25.0
 BAND_YELLOW_PCT = 40.0
+# Cross-store ratios use a tighter two-sided band (Dan, 2026-11-04):
+# the ratios are exactly 1.0 by construction, so any deviation is a
+# pipeline break and the band should alarm sooner than the label bands.
+CROSS_BAND_GREEN_PCT = 10.0
+CROSS_BAND_YELLOW_PCT = 25.0
 ATYPICAL_FLOOR_COUNT = 10.0
 LABELS_4 = ("hot", "drifting", "atypical", "steady")
 
@@ -179,14 +188,23 @@ def _icon_pct(pct: float | None) -> str | None:
     return "red"
 
 
-def _band_icon(deviation: float | None) -> str | None:
+def _band_icon(deviation: float | None,
+               green: float = BAND_GREEN_PCT,
+               yellow: float = BAND_YELLOW_PCT) -> str | None:
     if deviation is None:
         return None
-    if abs(deviation) <= BAND_GREEN_PCT:
+    if abs(deviation) <= green:
         return "green"
-    if abs(deviation) <= BAND_YELLOW_PCT:
+    if abs(deviation) <= yellow:
         return "yellow"
     return "red"
+
+
+def _deviation(ratio: float | None, baseline: float | None) -> float | None:
+    """Signed percent deviation of a ratio from its baseline."""
+    if ratio is None or baseline is None or baseline <= 0:
+        return None
+    return 100.0 * (ratio / baseline - 1.0)
 
 
 def _worst_icon(icons: list) -> str | None:
@@ -510,19 +528,21 @@ def fetch_health(rollup_conn: sqlite3.Connection,
             "union": len(dda_pairs.get(common, set())
                          | pb_pairs.get(common, set())),
             "volume_ratio": {"ratio": vol_now, "baseline": vol_base,
-                             "pct": _pct(vol_now, vol_base)
-                             if vol_now is not None else None,
-                             "icon": _icon_pct(
-                                 _pct(vol_now, vol_base)
-                                 if vol_now is not None else None),
+                             "deviation_pct": _deviation(vol_now,
+                                                         vol_base),
+                             "icon": _band_icon(
+                                 _deviation(vol_now, vol_base),
+                                 green=CROSS_BAND_GREEN_PCT,
+                                 yellow=CROSS_BAND_YELLOW_PCT),
                              "series": [[d.isoformat(), vol_ratios[d]]
                                         for d in sorted(vol_ratios)]},
             "dyad_jaccard": {"ratio": jac_now, "baseline": jac_base,
-                             "pct": _pct(jac_now, jac_base)
-                             if jac_now is not None else None,
-                             "icon": _icon_pct(
-                                 _pct(jac_now, jac_base)
-                                 if jac_now is not None else None),
+                             "deviation_pct": _deviation(jac_now,
+                                                         jac_base),
+                             "icon": _band_icon(
+                                 _deviation(jac_now, jac_base),
+                                 green=CROSS_BAND_GREEN_PCT,
+                                 yellow=CROSS_BAND_YELLOW_PCT),
                              "series": [[d.isoformat(), jac_ratios[d]]
                                         for d in sorted(jac_ratios)]},
         }
