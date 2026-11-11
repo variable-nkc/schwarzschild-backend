@@ -13,7 +13,7 @@ file surfaces as a clean "not configured" response, not a crash.
 import sqlite3
 from pathlib import Path
 
-from .config import BOOLEAN_COLUMNS, LABEL_PRIORITY, SETS
+from .config import BOOLEAN_COLUMNS, LABEL_PRIORITY, SETS, predictive_path
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -35,6 +35,40 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         if col in out and out[col] is not None:
             out[col] = bool(out[col])
     return out
+
+
+def _attach_predictive(rows: list[dict]) -> list[dict]:
+    """Attach the validated two-set exceedance to rollup row dicts.
+
+    Reads ``exc45_max`` / ``exc45_max_set`` from the predictive
+    build's ``dyad_predictive_summary`` (max over the escalatory
+    and instability sets only; INTEGRATION_SPEC D11) and sets them
+    on each row, matched on (iso1, iso2, as_of) via the summary's
+    unique index. Legacy ``max_exc45`` / ``max_exc45_set`` are
+    never modified — both are served during the transition.
+
+    The predictive DB is optional. When PREDICTIVE_SQLITE is unset
+    or the file is missing, rows are returned untouched (no
+    ``exc45_max`` key at all), so a caller can distinguish "not
+    served" from "served, but this dyad has no validated-set row
+    at this as-of" (key present, value None).
+    """
+    if not rows:
+        return rows
+    pp = predictive_path()
+    if pp is None or not pp.exists():
+        return rows
+    with _connect(pp) as conn:
+        for row in rows:
+            hit = conn.execute(
+                "SELECT exc45_max, exc45_max_set "
+                "FROM dyad_predictive_summary "
+                "WHERE iso1 = ? AND iso2 = ? AND as_of = ?",
+                (row["iso1"], row["iso2"], row["as_of"]),
+            ).fetchone()
+            row["exc45_max"] = hit["exc45_max"] if hit else None
+            row["exc45_max_set"] = hit["exc45_max_set"] if hit else None
+    return rows
 
 
 def fetch_provenance(path: Path) -> tuple | None:
@@ -75,7 +109,9 @@ def fetch_dyad(
                 "WHERE iso1 = ? AND iso2 = ? AND as_of = ?",
                 (iso1, iso2, as_of),
             ).fetchone()
-    return _row_to_dict(row) if row is not None else None
+    if row is None:
+        return None
+    return _attach_predictive([_row_to_dict(row)])[0]
 
 
 def latest_as_of(path: Path) -> str | None:
@@ -225,9 +261,10 @@ def fetch_watchlist(
     with _connect(path) as conn:
         if "insufficient" in wanted:
             keys = _watchlist_scan_keys(conn, effective, wanted, limit)
-            return effective, _fetch_rows_by_keys(conn, keys, effective)
-        return effective, _fetch_watchlist_sorted(
-            conn, effective, labels, limit)
+            return effective, _attach_predictive(
+                _fetch_rows_by_keys(conn, keys, effective))
+        return effective, _attach_predictive(_fetch_watchlist_sorted(
+            conn, effective, labels, limit))
 
 
 def fetch_history(path: Path, iso1: str, iso2: str) -> list[dict]:
@@ -238,7 +275,7 @@ def fetch_history(path: Path, iso1: str, iso2: str) -> list[dict]:
             "WHERE iso1 = ? AND iso2 = ? ORDER BY as_of ASC",
             (iso1, iso2),
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return _attach_predictive([_row_to_dict(r) for r in rows])
 
 
 def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
@@ -249,7 +286,9 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
     direction and std_resid, R7 share, temperature, label, the
     R7 support fields, the stored anomaly series, and the
     stored max exceedance (max_exc45) and the set attaining it
-    (max_exc45_set), and the four component label flags
+    (max_exc45_set), the validated two-set exceedance attached
+    from the predictive build (exc45_max / exc45_max_set, when
+    served), and the four component label flags
     (flag_insufficient, flag_hot, flag_drifting, flag_atypical).
     The
     panel-only fields (baseline mu, phi, Beta tails) are not in
@@ -276,6 +315,8 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "days_present_7": row.get("days_present_7"),
                 "max_exc45": row.get("max_exc45"),
                 "max_exc45_set": row.get("max_exc45_set"),
+                "exc45_max": row.get("exc45_max"),
+                "exc45_max_set": row.get("exc45_max_set"),
                 "flag_insufficient": row.get("flag_insufficient"),
                 "flag_hot": row.get("flag_hot"),
                 "flag_drifting": row.get("flag_drifting"),

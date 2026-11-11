@@ -17,6 +17,15 @@ ROLLUP_SQLITE
     silently serve the wrong database (or none) everywhere else.
     The README shows a placeholder path as an example only.
 
+PREDICTIVE_SQLITE
+    Full path to a ``rollup_predictive.sqlite`` file (the set-share
+    predictive build; tables ``dyad_set_predictive`` and
+    ``dyad_predictive_summary``). Optional: when set, rollup rows
+    are served with the validated two-set exceedance attached
+    (``exc45_max`` / ``exc45_max_set``) alongside the legacy
+    ``max_exc45`` fields (D11 transition). When unset or missing,
+    rows are served exactly as before, with no ``exc45_max`` key.
+
 API_VERSION_MODE
     ``strict`` (default) or ``warn``. See ``app/versioning.py``.
 
@@ -85,6 +94,19 @@ LABEL_PRIORITY = (
 def rollup_path() -> Path | None:
     """Return the configured rollup path, or None when unset."""
     raw = os.getenv("ROLLUP_SQLITE", "").strip()
+    return Path(raw) if raw else None
+
+
+def predictive_path() -> Path | None:
+    """Return the configured predictive path, or None when unset.
+
+    The predictive DB is the set-share build's output
+    (``dyad_predictive_summary`` carries the validated two-set
+    exceedance, ``exc45_max`` / ``exc45_max_set``). Unlike the
+    rollup it is optional: unset means the exceedance fields are
+    simply not attached (see ``app/store.py``).
+    """
+    raw = os.getenv("PREDICTIVE_SQLITE", "").strip()
     return Path(raw) if raw else None
 
 
