@@ -10,10 +10,20 @@ configured path exists before calling these functions, so a missing
 file surfaces as a clean "not configured" response, not a crash.
 """
 
+import bisect
+import datetime
 import sqlite3
 from pathlib import Path
 
-from .config import BOOLEAN_COLUMNS, LABEL_PRIORITY, SETS, predictive_path
+from .config import (
+    BOOLEAN_COLUMNS,
+    LABEL_PRIORITY,
+    SETS,
+    dda_path,
+    dda_sets_path,
+    predictive_path,
+)
+from .dev_dda_store import load_sets as _load_action_sets
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -68,6 +78,121 @@ def _attach_predictive(rows: list[dict]) -> list[dict]:
             ).fetchone()
             row["exc45_max"] = hit["exc45_max"] if hit else None
             row["exc45_max_set"] = hit["exc45_max_set"] if hit else None
+    return _attach_support(rows)
+
+
+# ---------------------------------------------------------------------
+# Set support: the observation footing under the pill.
+#
+# The pill's mu is a volume-weighted mean of a *carry-forward* share
+# series (seqbayes.setshare.daily_set_shares forward-fills each set
+# over days it has no records), so for a sparse dyad a high
+# exceedance can rest on a handful of genuine activity days — one
+# strong day, carried for weeks. Support makes that footing
+# visible: per set and as-of, how many of the trailing 90 days the
+# set was genuinely observed on, and how long ago it was last seen.
+# It annotates the pill; it never alters a served value.
+# ---------------------------------------------------------------------
+
+_SETS_BY_PATH: dict[str, dict[str, set[str]]] = {}
+
+
+def _action_sets() -> dict[str, set[str]] | None:
+    """CAMEO action-set membership for support counts, or None.
+
+    Support is served only when the DDA sidecar and its sets JSON
+    are both configured (the same pair the dev DDA endpoints use).
+    The parsed sets are cached per path for the process lifetime —
+    the file is a deployment constant.
+    """
+    dp, sp = dda_path(), dda_sets_path()
+    if dp is None or sp is None or not dp.exists() or not sp.exists():
+        return None
+    key = str(sp)
+    if key not in _SETS_BY_PATH:
+        _SETS_BY_PATH[key] = _load_action_sets(sp)
+    return _SETS_BY_PATH[key]
+
+
+def _set_dates(
+    conn: sqlite3.Connection, iso1: str, iso2: str, codes: set[str]
+) -> list[str]:
+    """Distinct obs_dates on which the dyad shows any code of one
+    set, ascending — the set's genuine activity days in the
+    sidecar."""
+    if not codes:
+        return []
+    marks = ",".join("?" * len(codes))
+    rows = conn.execute(
+        f"SELECT DISTINCT obs_date FROM dda "
+        f"WHERE iso1 = ? AND iso2 = ? AND cameo_code IN ({marks}) "
+        f"ORDER BY obs_date",
+        (iso1, iso2, *sorted(codes)),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _support_at(dates: list[str], as_of: str) -> dict:
+    """Support of one set at one as-of from its genuine-day list.
+
+    ``genuine_days_90d`` counts genuine days in the trailing
+    90-day window [as_of - 89d, as_of] — the window S0m averages
+    over. ``last_seen_days_ago`` is the age of the most recent
+    genuine day at or before the as-of (None when the set has
+    never been seen for this dyad up to the as-of, within the
+    sidecar's span).
+    """
+    a = datetime.date.fromisoformat(as_of)
+    start = (a - datetime.timedelta(days=89)).isoformat()
+    lo = bisect.bisect_left(dates, start)
+    hi = bisect.bisect_right(dates, as_of)
+    last = dates[hi - 1] if hi else None
+    return {
+        "genuine_days_90d": hi - lo,
+        "last_seen_days_ago": (
+            (a - datetime.date.fromisoformat(last)).days
+            if last is not None
+            else None
+        ),
+    }
+
+
+def _attach_support(rows: list[dict]) -> list[dict]:
+    """Attach ``exc45_support`` for each row's pill driving set.
+
+    Optionality mirrors the pill itself: rows without an
+    ``exc45_max`` key (predictive not served) are returned
+    untouched, and when the DDA pair is not configured the rows
+    are likewise untouched — no ``exc45_support`` key at all, so
+    a caller can tell "support not available" apart from
+    "served, but no pill to annotate" (key present, value None:
+    the sparse-dyad case, where ``exc45_max`` itself is None).
+    Genuine-day lists are cached per (dyad, set) across the call,
+    so a full history for one dyad costs one sidecar query per
+    driving set, not one per row.
+    """
+    sets = _action_sets()
+    if sets is None:
+        return rows
+    dp = dda_path()
+    assert dp is not None  # _action_sets() has just verified it
+    cache: dict[tuple[str, str, str], list[str]] = {}
+    with _connect(dp) as conn:
+        for row in rows:
+            if "exc45_max" not in row:
+                continue
+            drive = row.get("exc45_max_set")
+            if not drive or drive not in sets:
+                row["exc45_support"] = None
+                continue
+            key = (row["iso1"], row["iso2"], drive)
+            if key not in cache:
+                cache[key] = _set_dates(
+                    conn, row["iso1"], row["iso2"], sets[drive])
+            row["exc45_support"] = {
+                "set": drive,
+                **_support_at(cache[key], row["as_of"]),
+            }
     return rows
 
 
@@ -122,6 +247,21 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
                 "validated": validated,
             }
         )
+    # Per-row support (genuine_days_90d / last_seen_days_ago, as in
+    # _attach_support), when the DDA pair is configured; the keys
+    # are simply absent otherwise, so an unserved sidecar never
+    # changes this payload's shape.
+    sets = _action_sets()
+    if sets is not None and out:
+        dp = dda_path()
+        assert dp is not None  # _action_sets() has just verified it
+        with _connect(dp) as conn:
+            for name, srows in out.items():
+                if name not in sets:
+                    continue
+                dates = _set_dates(conn, iso1, iso2, sets[name])
+                for srow in srows:
+                    srow.update(_support_at(dates, srow["as_of"]))
     return out
 
 
@@ -342,7 +482,8 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
     stored max exceedance (max_exc45) and the set attaining it
     (max_exc45_set), the validated two-set exceedance attached
     from the predictive build (exc45_max / exc45_max_set, when
-    served), and the four component label flags
+    served) with its observation support (exc45_support, when
+    the DDA pair is also served), and the four component label flags
     (flag_insufficient, flag_hot, flag_drifting, flag_atypical).
     The
     panel-only fields (baseline mu, phi, Beta tails) are not in
@@ -373,6 +514,7 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "max_exc45_set": row.get("max_exc45_set"),
                 "exc45_max": row.get("exc45_max"),
                 "exc45_max_set": row.get("exc45_max_set"),
+                "exc45_support": row.get("exc45_support"),
                 "flag_insufficient": row.get("flag_insufficient"),
                 "flag_hot": row.get("flag_hot"),
                 "flag_drifting": row.get("flag_drifting"),

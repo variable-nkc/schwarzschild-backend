@@ -112,6 +112,11 @@ def test_predictive_sets_served_grouped_and_sorted(
 ) -> None:
     monkeypatch.setenv("PREDICTIVE_SQLITE",
                        str(predictive_path_fixture))
+    # Exact-shape assertion below: keep the DDA pair unconfigured
+    # so per-row support (served only with the sidecar pair, see
+    # test_set_support.py) cannot ride along from an ambient .env.
+    monkeypatch.delenv("DDA_SQLITE", raising=False)
+    monkeypatch.delenv("DDA_SETS_JSON", raising=False)
     resp = client.get("/pcs-series",
                       params={"iso1": "AAA", "iso2": "BBB"})
     assert resp.status_code == 200
