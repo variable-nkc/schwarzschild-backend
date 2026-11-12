@@ -48,14 +48,22 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 
 def _attach_predictive(rows: list[dict]) -> list[dict]:
-    """Attach the validated two-set exceedance to rollup row dicts.
+    """Attach the validated exceedance to rollup row dicts.
 
     Reads ``exc45_max`` / ``exc45_max_set`` from the predictive
-    build's ``dyad_predictive_summary`` (max over the escalatory
-    and instability sets only; INTEGRATION_SPEC D11) and sets them
-    on each row, matched on (iso1, iso2, as_of) via the summary's
+    build's ``dyad_predictive_summary`` (max over the
+    conflict-risk trio — escalatory, instability,
+    critical_incidents; INTEGRATION_SPEC D18) and sets them on
+    each row, matched on (iso1, iso2, as_of) via the summary's
     unique index. Legacy ``max_exc45`` / ``max_exc45_set`` are
     never modified — both are served during the transition.
+
+    D18 files also carry ``exc45_calm_max`` on the summary (max
+    over stability/deescalatory, NULL when neither emitted);
+    when the column exists it is attached under the same key
+    (None when the dyad has no summary row). Older summary
+    tables without the column leave the key absent entirely,
+    so a caller can tell "pre-D18 file" from "no calming row".
 
     The predictive DB is optional. When PREDICTIVE_SQLITE is unset
     or the file is missing, rows are returned untouched (no
@@ -69,15 +77,22 @@ def _attach_predictive(rows: list[dict]) -> list[dict]:
     if pp is None or not pp.exists():
         return rows
     with _connect(pp) as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(dyad_predictive_summary)")}
+        has_calm = "exc45_calm_max" in cols
+        sel = ("SELECT exc45_max, exc45_max_set"
+               + (", exc45_calm_max" if has_calm else "")
+               + " FROM dyad_predictive_summary "
+                 "WHERE iso1 = ? AND iso2 = ? AND as_of = ?")
         for row in rows:
             hit = conn.execute(
-                "SELECT exc45_max, exc45_max_set "
-                "FROM dyad_predictive_summary "
-                "WHERE iso1 = ? AND iso2 = ? AND as_of = ?",
-                (row["iso1"], row["iso2"], row["as_of"]),
+                sel, (row["iso1"], row["iso2"], row["as_of"]),
             ).fetchone()
             row["exc45_max"] = hit["exc45_max"] if hit else None
             row["exc45_max_set"] = hit["exc45_max_set"] if hit else None
+            if has_calm:
+                row["exc45_calm_max"] = (
+                    hit["exc45_calm_max"] if hit else None)
     return _attach_support(rows)
 
 
@@ -514,6 +529,7 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "max_exc45_set": row.get("max_exc45_set"),
                 "exc45_max": row.get("exc45_max"),
                 "exc45_max_set": row.get("exc45_max_set"),
+                "exc45_calm_max": row.get("exc45_calm_max"),
                 "exc45_support": row.get("exc45_support"),
                 "flag_insufficient": row.get("flag_insufficient"),
                 "flag_hot": row.get("flag_hot"),
