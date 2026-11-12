@@ -206,8 +206,8 @@ as a panel series.
 Separately, when `PREDICTIVE_SQLITE` is set (see
 `app/config.py`), the payload also carries `predictive_sets`:
 the set-share predictive build's per-set rows (mu, phi_adopted,
-bar, exc45 per as-of for the validated escalatory and
-instability sets) for the requested dyad. That is the
+bar, exc45 per as-of, with a `validated` tier flag) for the
+requested dyad. That is the
 predictive build's product, not the PCS panel series above.
 
 One more rollup quirk, stated so it is not misread: the rollup

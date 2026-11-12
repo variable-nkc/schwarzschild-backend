@@ -122,8 +122,11 @@ def test_predictive_sets_served_grouped_and_sorted(
     assert [r["as_of"] for r in esc] == AS_OFS
     assert esc[-1] == {
         "as_of": "2026-09-30", "mu": 0.5595, "phi_adopted": 12.956,
-        "bar": 0.1868, "exc45": 0.9984,
+        "bar": 0.1868, "exc45": 0.9984, "validated": True,
     }
+    # The fixture table has no `validated` column (pre-D16 file):
+    # the tier is derived from the set name.
+    assert sets["instability"][-1]["validated"] is True
     # The summary attach rides the same response, untouched.
     assert data["rows"][-1]["exc45_max"] == 0.9984
     assert data["rows"][-1]["exc45_max_set"] == "escalatory"
@@ -143,6 +146,44 @@ def test_predictive_sets_absent_when_unserved(
     # means its value is None. The key-absence contract applies to
     # the full-row responses (dyad-status, watchlist).
     assert data["rows"][-1]["exc45_max"] is None
+
+
+def test_predictive_sets_tier_from_validated_column(
+    client: TestClient, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A D16-generation file: the tier comes from the column."""
+    path = tmp_path / "predictive_d16.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE dyad_predictive_summary "
+        "(iso1 TEXT, iso2 TEXT, as_of TEXT, exc45_max REAL, "
+        "exc45_max_set TEXT)"
+    )
+    conn.execute(
+        'CREATE TABLE dyad_set_predictive '
+        '(iso1 TEXT, iso2 TEXT, as_of TEXT, "set" TEXT, mu REAL, '
+        "phi_current REAL, phi_adopted REAL, k REAL, bar REAL, "
+        "exc45 REAL, vintage INTEGER, validated INTEGER)"
+    )
+    for set_name, validated, exc45 in (
+            ("escalatory", 1, 0.9984), ("stability", 0, 0.0120)):
+        conn.execute(
+            "INSERT INTO dyad_set_predictive VALUES "
+            "('AAA', 'BBB', '2026-09-30', ?, 0.30, 2.0, 10.0, "
+            "5.1245, 0.25, ?, 380, ?)",
+            (set_name, exc45, validated),
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("PREDICTIVE_SQLITE", str(path))
+    resp = client.get("/pcs-series",
+                      params={"iso1": "AAA", "iso2": "BBB"})
+    assert resp.status_code == 200
+    sets = resp.json()["data"]["predictive_sets"]
+    assert sets["escalatory"][0]["validated"] is True
+    assert sets["stability"][0]["validated"] is False
+    assert sets["stability"][0]["exc45"] == 0.0120
 
 
 def test_predictive_sets_empty_for_unknown_dyad(

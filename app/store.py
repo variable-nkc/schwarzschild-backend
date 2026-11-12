@@ -75,10 +75,14 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
     """Per-set predictive history for one dyad, or None if unserved.
 
     Reads ``dyad_set_predictive`` — the predictive build's per-set
-    rows (mu, phi_adopted, bar, exc45 per as-of for the validated
-    sets, escalatory and instability) — grouped by set, as-of
-    ascending. Powers the Vet predictive figures (the per-set
-    exceedance trend and the Beta interval picture); the interval
+    rows (mu, phi_adopted, bar, exc45 per as-of) — grouped by set,
+    as-of ascending. Since the D16 build extension the table
+    carries all five sets, each stamped ``validated`` (1 for the
+    swept escalatory/instability pair, 0 for the context-grade
+    sets); pre-D16 files have no such column, and the tier is
+    then derived from the set name (the validated pair is exactly
+    escalatory + instability in every generation). Powers the
+    Vet predictive figures and Dig's per-set panel; the interval
     quantiles are derived client-side from mu / phi_adopted.
 
     Same optionality contract as ``_attach_predictive``: when
@@ -92,14 +96,22 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
         return None
     out: dict[str, list[dict]] = {}
     with _connect(pp) as conn:
+        cols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(dyad_set_predictive)")}
+        has_validated = "validated" in cols
         rows = conn.execute(
-            'SELECT as_of, "set", mu, phi_adopted, bar, exc45 '
-            "FROM dyad_set_predictive "
+            'SELECT as_of, "set", mu, phi_adopted, bar, exc45'
+            + (", validated" if has_validated else "")
+            + " FROM dyad_set_predictive "
             "WHERE iso1 = ? AND iso2 = ? "
             'ORDER BY "set", as_of',
             (iso1, iso2),
         ).fetchall()
     for r in rows:
+        if has_validated:
+            validated = bool(r["validated"])
+        else:
+            validated = r["set"] in ("escalatory", "instability")
         out.setdefault(r["set"], []).append(
             {
                 "as_of": r["as_of"],
@@ -107,6 +119,7 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
                 "phi_adopted": r["phi_adopted"],
                 "bar": r["bar"],
                 "exc45": r["exc45"],
+                "validated": validated,
             }
         )
     return out
