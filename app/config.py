@@ -23,8 +23,11 @@ PREDICTIVE_SQLITE
     ``dyad_predictive_summary``). Optional: when set, rollup rows
     are served with the validated two-set exceedance attached
     (``exc45_max`` / ``exc45_max_set``) alongside the legacy
-    ``max_exc45`` fields (D11 transition). When unset or missing,
-    rows are served exactly as before, with no ``exc45_max`` key.
+    ``max_exc45`` fields (D11 transition), and /pcs-series also
+    carries the build's per-set rows (mu, phi_adopted, bar, exc45
+    per as-of for the validated sets) as ``predictive_sets``.
+    When unset or missing, rows are served exactly as before,
+    with no ``exc45_max`` key and no ``predictive_sets`` key.
 
 API_VERSION_MODE
     ``strict`` (default) or ``warn``. See ``app/versioning.py``.

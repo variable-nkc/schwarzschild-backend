@@ -71,6 +71,47 @@ def _attach_predictive(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
+    """Per-set predictive history for one dyad, or None if unserved.
+
+    Reads ``dyad_set_predictive`` — the predictive build's per-set
+    rows (mu, phi_adopted, bar, exc45 per as-of for the validated
+    sets, escalatory and instability) — grouped by set, as-of
+    ascending. Powers the Vet predictive figures (the per-set
+    exceedance trend and the Beta interval picture); the interval
+    quantiles are derived client-side from mu / phi_adopted.
+
+    Same optionality contract as ``_attach_predictive``: when
+    PREDICTIVE_SQLITE is unset or the file is missing, returns
+    None so the caller omits the payload key entirely ("not
+    served"); when the build is served but the dyad has no
+    per-set rows, returns {} ("served, empty for this dyad").
+    """
+    pp = predictive_path()
+    if pp is None or not pp.exists():
+        return None
+    out: dict[str, list[dict]] = {}
+    with _connect(pp) as conn:
+        rows = conn.execute(
+            'SELECT as_of, "set", mu, phi_adopted, bar, exc45 '
+            "FROM dyad_set_predictive "
+            "WHERE iso1 = ? AND iso2 = ? "
+            'ORDER BY "set", as_of',
+            (iso1, iso2),
+        ).fetchall()
+    for r in rows:
+        out.setdefault(r["set"], []).append(
+            {
+                "as_of": r["as_of"],
+                "mu": r["mu"],
+                "phi_adopted": r["phi_adopted"],
+                "bar": r["bar"],
+                "exc45": r["exc45"],
+            }
+        )
+    return out
+
+
 def fetch_provenance(path: Path) -> tuple | None:
     """Return one (build_id, vintage, computed_at) tuple from the DB.
 
@@ -292,8 +333,10 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
     (flag_insufficient, flag_hot, flag_drifting, flag_atypical).
     The
     panel-only fields (baseline mu, phi, Beta tails) are not in
-    the rollup and are deliberately not invented here — serving
-    them is a later object (see README, "Not built yet").
+    the rollup and are deliberately not invented here. The
+    predictive build's per-set rows (mu, phi_adopted, bar, exc45)
+    are served alongside this payload as ``predictive_sets`` by
+    the /pcs-series endpoint — see ``fetch_predictive_sets``.
     """
     series_rows = []
     for row in rows:

@@ -331,9 +331,11 @@ def create_app() -> FastAPI:
                 provenance, warnings, 404, "dyad_not_found",
                 f"No rollup history for {iso1}_{iso2}.",
             )
-        return _ok(
-            provenance, warnings, store.build_series(iso1, iso2, rows)
-        )
+        payload = store.build_series(iso1, iso2, rows)
+        predictive_sets = store.fetch_predictive_sets(iso1, iso2)
+        if predictive_sets is not None:
+            payload["predictive_sets"] = predictive_sets
+        return _ok(provenance, warnings, payload)
 
     @app.get("/census", response_model=None)
     def census(
