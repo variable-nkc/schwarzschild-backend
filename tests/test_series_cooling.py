@@ -121,3 +121,49 @@ def test_pcs_series_omits_cooling_keys_on_pre_cooling_rollup(
     assert rows[0]["temperature"] == 0.60
     assert rows[0]["flag_hot"] == 1
     assert rows[2]["label"] == "steady"
+
+
+def test_lc01_days_carry_cooling_flags_when_columns_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # LC-01 has its own projection (lc_store.fetch_lc01); its
+    # days carry the cooling flags as bool / None, in the same
+    # shape as the four component flags, so the verdict ribbon
+    # can mark cooling days.
+    client = _client(
+        _build_db(tmp_path / "rollup.sqlite", with_cooling=True),
+        monkeypatch)
+    resp = client.get(
+        "/lc/lc-01", params={"iso1": "AAA", "iso2": "BBB",
+                             "as_of": "2026-09-30"})
+    assert resp.status_code == 200
+    days = resp.json()["data"]["days"]
+    assert [d["as_of"] for d in days] == [
+        "2026-09-28", "2026-09-29", "2026-09-30"]
+    assert [(d["flag_cooling_005"], d["flag_cooling_010"])
+            for d in days] == [
+                (True, True), (True, False), (None, None)]
+    # The delta is computed from the four component flags only:
+    # 09-29 -> 09-30 changes label hot -> steady, nothing else.
+    delta = resp.json()["data"]["delta"]
+    assert delta["label_change"] == {"from": "hot", "to": "steady"}
+    assert delta["flag_changes"] == [
+        {"flag": "flag_hot", "from": True, "to": False}]
+
+
+def test_lc01_days_omit_cooling_keys_on_pre_cooling_rollup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(
+        _build_db(tmp_path / "rollup.sqlite", with_cooling=False),
+        monkeypatch)
+    resp = client.get(
+        "/lc/lc-01", params={"iso1": "AAA", "iso2": "BBB",
+                             "as_of": "2026-09-30"})
+    assert resp.status_code == 200
+    days = resp.json()["data"]["days"]
+    assert len(days) == 3
+    for day in days:
+        assert "flag_cooling_005" not in day
+        assert "flag_cooling_010" not in day
+    assert days[-1]["flag_hot"] is False

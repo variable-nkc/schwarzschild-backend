@@ -295,6 +295,15 @@ def fetch_lc01(
     text is exactly "no change since yesterday". With fewer
     than two days there is no previous as-of and delta text is
     null. No recent-typical mark is computed or returned.
+
+    When the rollup carries the preprocessed cooling flags
+    (``flag_cooling_005`` / ``flag_cooling_010``, LC-03), each
+    day also carries them as bool / None, in the same shape as
+    the four component flags; on a pre-cooling rollup the keys
+    are absent from every day — the same degradation pattern
+    as the census ``cooling`` block. The cooling flags are NOT
+    part of the delta: FLAGS above stays the four component
+    flags, so delta text and flag_changes are unchanged.
     """
     effective = _resolve_rollup_as_of(conn, iso1, iso2, as_of)
     if effective is None:
@@ -310,39 +319,54 @@ def fetch_lc01(
                 "text": None,
             },
         }
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(dyad_status_rollup)")}
+    has_cooling = {"flag_cooling_005", "flag_cooling_010"} <= cols
     rows = conn.execute(
         "SELECT as_of, label, flag_insufficient, flag_hot, "
-        "flag_drifting, flag_atypical FROM dyad_status_rollup "
+        "flag_drifting, flag_atypical"
+        + (", flag_cooling_005, flag_cooling_010" if has_cooling else "")
+        + " FROM dyad_status_rollup "
         "WHERE iso1 = ? AND iso2 = ? AND as_of <= ? "
         "ORDER BY as_of DESC LIMIT ?",
         (iso1, iso2, effective, window),
     ).fetchall()
     days = []
     for r in reversed(rows):
-        days.append(
-            {
-                "as_of": r["as_of"],
-                "label": r["label"],
-                "flag_insufficient": (
-                    bool(r["flag_insufficient"])
-                    if r["flag_insufficient"] is not None
-                    else None
-                ),
-                "flag_hot": (
-                    bool(r["flag_hot"]) if r["flag_hot"] is not None else None
-                ),
-                "flag_drifting": (
-                    bool(r["flag_drifting"])
-                    if r["flag_drifting"] is not None
-                    else None
-                ),
-                "flag_atypical": (
-                    bool(r["flag_atypical"])
-                    if r["flag_atypical"] is not None
-                    else None
-                ),
-            }
-        )
+        day = {
+            "as_of": r["as_of"],
+            "label": r["label"],
+            "flag_insufficient": (
+                bool(r["flag_insufficient"])
+                if r["flag_insufficient"] is not None
+                else None
+            ),
+            "flag_hot": (
+                bool(r["flag_hot"]) if r["flag_hot"] is not None else None
+            ),
+            "flag_drifting": (
+                bool(r["flag_drifting"])
+                if r["flag_drifting"] is not None
+                else None
+            ),
+            "flag_atypical": (
+                bool(r["flag_atypical"])
+                if r["flag_atypical"] is not None
+                else None
+            ),
+        }
+        if has_cooling:
+            day["flag_cooling_005"] = (
+                bool(r["flag_cooling_005"])
+                if r["flag_cooling_005"] is not None
+                else None
+            )
+            day["flag_cooling_010"] = (
+                bool(r["flag_cooling_010"])
+                if r["flag_cooling_010"] is not None
+                else None
+            )
+        days.append(day)
     today = days[-1]
     if len(days) < 2:
         delta = {
