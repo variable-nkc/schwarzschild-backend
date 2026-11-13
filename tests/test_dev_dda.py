@@ -142,6 +142,16 @@ def test_codes_rows_and_provisional_baseline(dev_env):
     assert by_code["040"]["share_at_asof"] == pytest.approx(0.4)
     assert by_code["040"]["count_window"] == 6
     assert by_code["040"]["baseline_daily_mean"] == pytest.approx(2.0)
+    # Trailing-7d aggregates (2026-11-13): the fixture's three
+    # days all fall inside the 7 days ending 2026-09-30, so
+    # count_7d equals the window count here; the mapped 7d
+    # volume is 35 (4+6+10 on 09-28, 9+6 on 09-30; 999 out).
+    assert by_code["010"]["count_7d"] == 13
+    assert by_code["010"]["share_7d"] == pytest.approx(13 / 35)
+    assert by_code["040"]["count_7d"] == 6
+    assert by_code["040"]["share_7d"] == pytest.approx(6 / 35)
+    assert by_code["999"]["count_7d"] == 3
+    assert by_code["999"]["share_7d"] == pytest.approx(3 / 35)
 
 
 def test_joint_values_gap_and_coverage(dev_env):

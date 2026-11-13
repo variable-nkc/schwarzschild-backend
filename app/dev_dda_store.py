@@ -325,11 +325,28 @@ def fetch_codes(
         (iso1, iso2, start.isoformat(), end.isoformat()),
     ):
         win[r["cameo_code"]] = r["s"]
+    # Trailing 7 days ending at the as-of (2026-11-13): the
+    # code tables display this window so they reference the
+    # same span as the R7 set shares. Same share definition as
+    # share_at_asof — the code's count over mapped volume —
+    # windowed over the 7 days.
+    start7 = end - timedelta(days=6)
+    wk7: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT cameo_code, SUM(obs_count) AS s FROM dda"
+        " WHERE iso1 = ? AND iso2 = ? AND obs_date >= ? AND obs_date <= ?"
+        " GROUP BY cameo_code",
+        (iso1, iso2, start7.isoformat(), end.isoformat()),
+    ):
+        wk7[r["cameo_code"]] = r["s"]
     volume_mapped_at = sum(c for code, c in at.items() if code in mapped)
+    volume_mapped_7d = sum(c for code, c in wk7.items() if code in mapped)
     rows = []
-    for code in sorted(win, key=lambda c: (-at.get(c, 0), c)):
+    for code in sorted(set(win) | set(wk7),
+                       key=lambda c: (-at.get(c, 0), c)):
         code_sets = sorted(s for s, members in sets.items() if code in members)
         count_at = at.get(code, 0)
+        count_7d = wk7.get(code, 0)
         rows.append(
             {
                 "cameo_code": code,
@@ -338,8 +355,13 @@ def fetch_codes(
                 "share_at_asof": (
                     (count_at / volume_mapped_at) if volume_mapped_at else None
                 ),
-                "count_window": win[code],
-                "baseline_daily_mean": win[code] / window,
+                "count_7d": count_7d,
+                "share_7d": (
+                    (count_7d / volume_mapped_7d)
+                    if volume_mapped_7d else None
+                ),
+                "count_window": win.get(code, 0),
+                "baseline_daily_mean": win.get(code, 0) / window,
             }
         )
     return (
