@@ -172,6 +172,95 @@ def _support_at(dates: list[str], as_of: str) -> dict:
     }
 
 
+_DDA_MAX_BY_PATH: dict[str, str | None] = {}
+
+
+def _dda_max_date(conn: sqlite3.Connection, dp: Path) -> str | None:
+    """Latest obs_date in the sidecar, cached per path.
+
+    The sidecar is a deployment constant for the process lifetime
+    (same footing as the sets JSON), so the max is read once. It
+    bounds the realized-outcome gate: a forecast's 45-day horizon
+    has elapsed only when as_of + 45d falls on or before this
+    date.
+    """
+    key = str(dp)
+    if key not in _DDA_MAX_BY_PATH:
+        row = conn.execute("SELECT MAX(obs_date) FROM dda").fetchone()
+        _DDA_MAX_BY_PATH[key] = row[0] if row else None
+    return _DDA_MAX_BY_PATH[key]
+
+
+def _daily_frame(
+    conn: sqlite3.Connection, iso1: str, iso2: str,
+    sets: dict[str, set[str]],
+) -> tuple[list[str], list[float], dict[str, list[float]]]:
+    """One dyad's daily counts as prefix sums over its active days.
+
+    Returns (dates, vol_prefix, {set: num_prefix}): dates are the
+    dyad's distinct obs_dates ascending, vol is a day's total
+    obs_count over ALL its records (the pooled denominator), and
+    num is a day's obs_count summed over a set's codes — per set,
+    independently, because the sets overlap (a critical-incidents
+    code also counts toward instability). Days with no records are
+    absent from the axis and contribute 0 to any window sum, so
+    prefix sums over the observed axis give exact window totals.
+    """
+    code_to_sets: dict[str, list[str]] = {}
+    for name, codes in sets.items():
+        for c in codes:
+            code_to_sets.setdefault(c, []).append(name)
+    vol_by_date: dict[str, float] = {}
+    num_by_date: dict[str, dict[str, float]] = {n: {} for n in sets}
+    for obs_date, code, total in conn.execute(
+        "SELECT obs_date, cameo_code, SUM(obs_count) FROM dda "
+        "WHERE iso1 = ? AND iso2 = ? GROUP BY obs_date, cameo_code",
+        (iso1, iso2),
+    ):
+        vol_by_date[obs_date] = vol_by_date.get(obs_date, 0.0) + total
+        for name in code_to_sets.get(code, ()):
+            d = num_by_date[name]
+            d[obs_date] = d.get(obs_date, 0.0) + total
+    dates = sorted(vol_by_date)
+
+    def _prefix(by_date: dict[str, float]) -> list[float]:
+        out = [0.0]
+        for d in dates:
+            out.append(out[-1] + by_date.get(d, 0.0))
+        return out
+
+    return dates, _prefix(vol_by_date), {
+        n: _prefix(num_by_date[n]) for n in sets}
+
+
+def _realized_at(dates: list[str], vol_prefix: list[float],
+                 num_prefix: list[float], as_of: str,
+                 max_date: str | None) -> float | None:
+    """Realized 45d outcome for one predictive row.
+
+    The outcome statistic the D17 sweep validated against: the
+    pooled trailing-90d share — Σ set obs / Σ total obs over
+    [as_of + 45d − 89d, as_of + 45d] — i.e. the same S0m the
+    predictive distribution forecasts, evaluated at the horizon
+    date. None when the horizon has not elapsed by the sidecar's
+    last date, or when the realized window carries no volume (the
+    pooled ratio is then undefined, not zero).
+    """
+    if max_date is None:
+        return None
+    a = datetime.date.fromisoformat(as_of)
+    end = a + datetime.timedelta(days=45)
+    if end.isoformat() > max_date:
+        return None
+    start = (end - datetime.timedelta(days=89)).isoformat()
+    lo = bisect.bisect_left(dates, start)
+    hi = bisect.bisect_right(dates, end.isoformat())
+    vol = vol_prefix[hi] - vol_prefix[lo]
+    if vol <= 0:
+        return None
+    return (num_prefix[hi] - num_prefix[lo]) / vol
+
+
 def _attach_support(rows: list[dict]) -> list[dict]:
     """Attach ``exc45_support`` for each row's pill driving set.
 
@@ -224,6 +313,11 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
     escalatory + instability in every generation). Powers the
     Vet predictive figures and Dig's per-set panel; the interval
     quantiles are derived client-side from mu / phi_adopted.
+    When the DDA pair is configured, each row additionally
+    carries the support keys and ``realized_45d`` — the realized
+    outcome statistic (the pooled S0m evaluated at as_of + 45d,
+    the quantity the D17 sweep scored coverage against), None
+    until that horizon has elapsed.
 
     Same optionality contract as ``_attach_predictive``: when
     PREDICTIVE_SQLITE is unset or the file is missing, returns
@@ -277,6 +371,20 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
                 dates = _set_dates(conn, iso1, iso2, sets[name])
                 for srow in srows:
                     srow.update(_support_at(dates, srow["as_of"]))
+            # Realized 45d outcomes from the same sidecar (see
+            # _realized_at): merged per row as realized_45d, None
+            # until the row's horizon has elapsed. One grouped
+            # pass over the dyad's records serves every set.
+            max_date = _dda_max_date(conn, dp)
+            dates, vol_prefix, num_prefix = _daily_frame(
+                conn, iso1, iso2, sets)
+            for name, srows in out.items():
+                if name not in sets:
+                    continue
+                for srow in srows:
+                    srow["realized_45d"] = _realized_at(
+                        dates, vol_prefix, num_prefix[name],
+                        srow["as_of"], max_date)
     return out
 
 
