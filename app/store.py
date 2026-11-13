@@ -694,6 +694,85 @@ def fetch_census(
     return effective, counts, total
 
 
+def fetch_census_cooling(
+    path: Path, effective: str | None
+) -> dict | None:
+    """Return the census cooling block (LC-03), or None.
+
+    Cooling is preprocessed in the rollup build: ``flag_cooling_005``
+    / ``flag_cooling_010`` store the 28-day temperature fall at the
+    two thresholds, gated on a sufficient label (seqbayes
+    FOUNDATIONS_SPEC §2.4a, decided 2026-11-13). The block is
+    served only when the rollup table carries both columns; a
+    pre-cooling rollup returns None and the census payload omits
+    the ``cooling`` key entirely — the same degradation pattern
+    as the predictive grade column, so a caller can tell an old
+    build from a slice with no cooling dyads.
+
+    One slice read; the aggregation counts stored flags, exactly
+    as ``fetch_census`` counts stored labels. ``labels`` covers
+    every label (insufficient rows carry NULL cooling flags by
+    construction, so their cooling counts come out 0).
+    ``also_flagged_005`` counts, among sufficient dyads cooling
+    at the 0.05 threshold, how many carry each stored flag — a
+    dyad can carry several, so the counts overlap. ``cross`` is
+    the hot x drifting x atypical flag cross over sufficient
+    dyads only, all 8 rows always present in (hot, drifting,
+    atypical) binary order; its ``n`` sums to the sufficient
+    total at the as-of.
+    """
+    with _connect(path) as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(dyad_status_rollup)")}
+        if not {"flag_cooling_005", "flag_cooling_010"} <= cols:
+            return None
+        labels = {
+            label: {"n": 0, "cooling_005": 0, "cooling_010": 0}
+            for label in LABEL_PRIORITY
+        }
+        also = {"hot": 0, "drifting": 0, "atypical": 0}
+        cross = {
+            (h, d, a): {"hot": bool(h), "drifting": bool(d),
+                        "atypical": bool(a), "n": 0, "cooling_005": 0}
+            for h in (0, 1) for d in (0, 1) for a in (0, 1)
+        }
+        if effective is not None:
+            rows = conn.execute(
+                "SELECT label, flag_hot, flag_drifting, "
+                "flag_atypical, flag_cooling_005, flag_cooling_010 "
+                "FROM dyad_status_rollup WHERE as_of = ?",
+                (effective,),
+            ).fetchall()
+            for label, f_hot, f_drift, f_atyp, c005, c010 in rows:
+                if label not in labels:
+                    continue
+                entry = labels[label]
+                entry["n"] += 1
+                if c005 == 1:
+                    entry["cooling_005"] += 1
+                if c010 == 1:
+                    entry["cooling_010"] += 1
+                if label == "insufficient":
+                    continue
+                cell = cross[(1 if f_hot == 1 else 0,
+                              1 if f_drift == 1 else 0,
+                              1 if f_atyp == 1 else 0)]
+                cell["n"] += 1
+                if c005 == 1:
+                    cell["cooling_005"] += 1
+                    if f_hot == 1:
+                        also["hot"] += 1
+                    if f_drift == 1:
+                        also["drifting"] += 1
+                    if f_atyp == 1:
+                        also["atypical"] += 1
+    return {
+        "labels": labels,
+        "also_flagged_005": also,
+        "cross": [cross[key] for key in sorted(cross)],
+    }
+
+
 def fetch_census_series(path: Path) -> list[dict]:
     """Return one row per as-of: label counts plus total, oldest first.
 

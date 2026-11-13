@@ -31,7 +31,12 @@ Endpoints (all responses carry the provenance envelope; see
   per-set blocks.
 - ``GET /census?as_of=`` — label counts at one as-of (latest
   as-of when omitted). An as-of with no rows returns all-zero
-  counts, not an error, mirroring the watchlist.
+  counts, not an error, mirroring the watchlist. When the
+  rollup carries the preprocessed cooling flags, the payload
+  also carries a ``cooling`` block (LC-03: per-label cooling
+  counts at both thresholds, also-flagged counts, and the
+  flag cross over sufficient dyads); the key is absent on a
+  pre-cooling rollup.
 - ``GET /census-series`` — label counts per as-of, oldest first:
   the composition-over-time series.
 
@@ -389,16 +394,24 @@ def create_app() -> FastAPI:
             effective, counts, total = store.fetch_census(
                 path, as_of  # type: ignore[arg-type]
             )
+            cooling = store.fetch_census_cooling(
+                path, effective  # type: ignore[arg-type]
+            )
         except sqlite3.Error as exc:
             return _fail(
                 provenance, warnings, 503, "db_error",
                 f"Could not read rollup DB: {exc}",
             )
-        return _ok(
-            provenance,
-            warnings,
-            {"as_of": effective, "total": total, "counts": counts},
-        )
+        payload: dict = {
+            "as_of": effective, "total": total, "counts": counts,
+        }
+        # LC-03 cooling block: present only when the rollup was
+        # built with the preprocessed cooling flags; the key is
+        # absent entirely on a pre-cooling rollup (see
+        # store.fetch_census_cooling).
+        if cooling is not None:
+            payload["cooling"] = cooling
+        return _ok(provenance, warnings, payload)
 
     @app.get("/census-series", response_model=None)
     def census_series(
