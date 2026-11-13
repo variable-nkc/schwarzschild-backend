@@ -601,7 +601,32 @@ def fetch_history(path: Path, iso1: str, iso2: str) -> list[dict]:
     return _attach_predictive([_row_to_dict(r) for r in rows])
 
 
-def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
+_COOLING_BY_PATH: dict[str, bool] = {}
+
+
+def _rollup_has_cooling(path: Path) -> bool:
+    """Whether the rollup carries the preprocessed cooling flags.
+
+    ``flag_cooling_005`` / ``flag_cooling_010`` are written by
+    the rollup build only since the LC-03 build (seqbayes
+    FOUNDATIONS_SPEC §2.4a); older rollups lack both columns.
+    The check is cached per path for the process lifetime — the
+    rollup file is a deployment constant, like the sets JSON and
+    the sidecar max date.
+    """
+    key = str(path)
+    if key not in _COOLING_BY_PATH:
+        with _connect(path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(dyad_status_rollup)")}
+        _COOLING_BY_PATH[key] = (
+            {"flag_cooling_005", "flag_cooling_010"} <= cols)
+    return _COOLING_BY_PATH[key]
+
+
+def build_series(
+    iso1: str, iso2: str, rows: list[dict], path: Path
+) -> dict:
     """Build the v1 PCS-series payload from rollup history rows.
 
     This is a *rollup-history* series, not the PCS panel series: it
@@ -614,13 +639,21 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
     served) with its observation support (exc45_support, when
     the DDA pair is also served), and the four component label flags
     (flag_insufficient, flag_hot, flag_drifting, flag_atypical).
-    The
+    When the rollup carries the preprocessed cooling flags
+    (``flag_cooling_005`` / ``flag_cooling_010`` — the 28-day
+    temperature fall at the two thresholds, LC-03), their stored
+    values ride alongside the label flags (1 / 0 / None); on a
+    pre-cooling rollup the keys are absent from every row, so a
+    caller can tell an old build from a served one — the same
+    degradation pattern as the census ``cooling`` block (see
+    ``fetch_census_cooling``). The
     panel-only fields (baseline mu, phi, Beta tails) are not in
     the rollup and are deliberately not invented here. The
     predictive build's per-set rows (mu, phi_adopted, bar, exc45)
     are served alongside this payload as ``predictive_sets`` by
     the /pcs-series endpoint — see ``fetch_predictive_sets``.
     """
+    has_cooling = bool(rows) and _rollup_has_cooling(path)
     series_rows = []
     for row in rows:
         per_set = {}
@@ -632,29 +665,31 @@ def build_series(iso1: str, iso2: str, rows: list[dict]) -> dict:
                 "direction_r28": row.get(f"dir_r28_{name}"),
                 "std_resid_r28": row.get(f"std_r28_{name}"),
             }
-        series_rows.append(
-            {
-                "as_of": row.get("as_of"),
-                "temperature": row.get("temperature"),
-                "label": row.get("label"),
-                "v_7d": row.get("v_7d"),
-                "days_present_7": row.get("days_present_7"),
-                "max_exc45": row.get("max_exc45"),
-                "max_exc45_set": row.get("max_exc45_set"),
-                "exc45_max": row.get("exc45_max"),
-                "exc45_max_set": row.get("exc45_max_set"),
-                "exc45_calm_max": row.get("exc45_calm_max"),
-                "exc45_support": row.get("exc45_support"),
-                "flag_insufficient": row.get("flag_insufficient"),
-                "flag_hot": row.get("flag_hot"),
-                "flag_drifting": row.get("flag_drifting"),
-                "flag_atypical": row.get("flag_atypical"),
-                "anomaly_composite": row.get("anomaly_composite"),
-                "anomaly_composite_raw": row.get("anomaly_composite_raw"),
-                "anomaly_max3d": row.get("anomaly_max3d"),
-                "per_set": per_set,
-            }
-        )
+        projected = {
+            "as_of": row.get("as_of"),
+            "temperature": row.get("temperature"),
+            "label": row.get("label"),
+            "v_7d": row.get("v_7d"),
+            "days_present_7": row.get("days_present_7"),
+            "max_exc45": row.get("max_exc45"),
+            "max_exc45_set": row.get("max_exc45_set"),
+            "exc45_max": row.get("exc45_max"),
+            "exc45_max_set": row.get("exc45_max_set"),
+            "exc45_calm_max": row.get("exc45_calm_max"),
+            "exc45_support": row.get("exc45_support"),
+            "flag_insufficient": row.get("flag_insufficient"),
+            "flag_hot": row.get("flag_hot"),
+            "flag_drifting": row.get("flag_drifting"),
+            "flag_atypical": row.get("flag_atypical"),
+            "anomaly_composite": row.get("anomaly_composite"),
+            "anomaly_composite_raw": row.get("anomaly_composite_raw"),
+            "anomaly_max3d": row.get("anomaly_max3d"),
+            "per_set": per_set,
+        }
+        if has_cooling:
+            projected["flag_cooling_005"] = row.get("flag_cooling_005")
+            projected["flag_cooling_010"] = row.get("flag_cooling_010")
+        series_rows.append(projected)
     return {
         "dyad_id": f"{iso1}_{iso2}",
         "iso1": iso1,

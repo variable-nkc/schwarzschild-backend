@@ -369,7 +369,7 @@ def create_app() -> FastAPI:
                 provenance, warnings, 404, "dyad_not_found",
                 f"No rollup history for {iso1}_{iso2}.",
             )
-        payload = store.build_series(iso1, iso2, rows)
+        payload = store.build_series(iso1, iso2, rows, path)  # type: ignore[arg-type]
         predictive_sets = store.fetch_predictive_sets(iso1, iso2)
         if predictive_sets is not None:
             payload["predictive_sets"] = predictive_sets
