@@ -317,7 +317,10 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
     carries the support keys and ``realized_45d`` — the realized
     outcome statistic (the pooled S0m evaluated at as_of + 45d,
     the quantity the D17 sweep scored coverage against), None
-    until that horizon has elapsed.
+    until that horizon has elapsed. D19 builds additionally
+    carry a per-row ``grade`` ('validated' / 'indicative' —
+    the row's domain grade, spec section 12.3); the key is
+    present only when the served file has the column.
 
     Same optionality contract as ``_attach_predictive``: when
     PREDICTIVE_SQLITE is unset or the file is missing, returns
@@ -333,9 +336,11 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
         cols = {r["name"] for r in conn.execute(
             "PRAGMA table_info(dyad_set_predictive)")}
         has_validated = "validated" in cols
+        has_grade = "grade" in cols
         rows = conn.execute(
             'SELECT as_of, "set", mu, phi_adopted, bar, exc45'
             + (", validated" if has_validated else "")
+            + (", grade" if has_grade else "")
             + " FROM dyad_set_predictive "
             "WHERE iso1 = ? AND iso2 = ? "
             'ORDER BY "set", as_of',
@@ -346,16 +351,17 @@ def fetch_predictive_sets(iso1: str, iso2: str) -> dict | None:
             validated = bool(r["validated"])
         else:
             validated = r["set"] in ("escalatory", "instability")
-        out.setdefault(r["set"], []).append(
-            {
-                "as_of": r["as_of"],
-                "mu": r["mu"],
-                "phi_adopted": r["phi_adopted"],
-                "bar": r["bar"],
-                "exc45": r["exc45"],
-                "validated": validated,
-            }
-        )
+        row = {
+            "as_of": r["as_of"],
+            "mu": r["mu"],
+            "phi_adopted": r["phi_adopted"],
+            "bar": r["bar"],
+            "exc45": r["exc45"],
+            "validated": validated,
+        }
+        if has_grade:
+            row["grade"] = r["grade"]
+        out.setdefault(r["set"], []).append(row)
     # Per-row support (genuine_days_90d / last_seen_days_ago, as in
     # _attach_support), when the DDA pair is configured; the keys
     # are simply absent otherwise, so an unserved sidecar never
