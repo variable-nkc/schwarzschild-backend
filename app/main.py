@@ -201,6 +201,39 @@ def _fail(
     )
 
 
+def _load_pill_by_dyad(as_of: str) -> dict | None:
+    """{(iso1, iso2): exc45_max} from the predictive build's
+    dyad_predictive_summary at one as-of, or None.
+
+    Mirrors store._attach_predictive's access pattern
+    (PREDICTIVE_SQLITE via config.predictive_path, read-only
+    connection, PRAGMA column check). The predictive DB is
+    optional: unset, missing, or lacking the summary table /
+    exc45_max column all degrade to None — the country fold
+    then emits pill_max nulls and the endpoint still serves.
+    """
+    from .config import predictive_path
+
+    pp = predictive_path()
+    if pp is None or not pp.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{pp}?mode=ro", uri=True)
+        try:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(dyad_predictive_summary)")}
+            if "exc45_max" not in cols:
+                return None
+            return {(r[0], r[1]): r[2] for r in conn.execute(
+                "SELECT iso1, iso2, exc45_max"
+                " FROM dyad_predictive_summary WHERE as_of = ?",
+                (as_of,))}
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
 def create_app() -> FastAPI:
     """Application factory (keeps tests able to build a fresh app)."""
     app = FastAPI(
@@ -590,6 +623,16 @@ def create_app() -> FastAPI:
     @app.get("/dev/country-aggregates", response_model=None)
     def dev_country_aggregates(
         as_of: str | None = Query(default=None),
+        dyads: str | None = Query(
+            default=None,
+            description="Comma-joined ISO1_ISO2 dyads to scope "
+                        "the fold to (Scan context map).",
+        ),
+        view: str = Query(
+            default="involvement",
+            description="Which country slot(s) a counted dyad "
+                        "feeds: involvement | targets | sources.",
+        ),
         api_version: str | None = Query(
             default=None,
             description="Expected payload contract version.",
@@ -602,6 +645,11 @@ def create_app() -> FastAPI:
         # share_flagged). Needs the rollup AND the mirror
         # (polygons); either unset means 503, same discipline
         # as the other dev endpoints. Same version gate.
+        # Scoped mode (Scan context map, 2026-11-13): `dyads`
+        # restricts the fold to the given dyads in BOTH slices
+        # and `view` picks the fed slot(s); rows also carry
+        # n_flagged and pill_max (the predictive summary's
+        # exc45_max at the effective as-of, when configured).
         from . import country_store
 
         rollup = config.rollup_path()
@@ -632,6 +680,27 @@ def create_app() -> FastAPI:
         warnings, error = _version_gate(provenance, api_version)
         if error is not None:
             return error
+        if view not in ("involvement", "targets", "sources"):
+            return _fail(
+                provenance, warnings, 400, "bad_view",
+                f"Unknown view: {view!r} (expected involvement, "
+                "targets, or sources).",
+            )
+        dyad_set: set[tuple[str, str]] | None = None
+        if dyads is not None:
+            dyad_set = set()
+            for token in dyads.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                parts = token.split("_")
+                if len(parts) != 2 or not all(parts):
+                    return _fail(
+                        provenance, warnings, 400, "bad_dyads",
+                        f"Malformed dyad: {token!r} "
+                        "(expected ISO1_ISO2).",
+                    )
+                dyad_set.add((parts[0], parts[1]))
         if not rollup.exists() or not mirror.exists():
             return _fail(
                 provenance, warnings, 503, "db_missing",
@@ -642,8 +711,14 @@ def create_app() -> FastAPI:
             try:
                 mconn = country_store.connect(mirror)
                 try:
+                    effective = country_store._latest_as_of(
+                        rconn, as_of)
+                    pill_by_dyad = (
+                        _load_pill_by_dyad(effective)
+                        if effective is not None else None)
                     data = country_store.fetch_country_aggregates(
-                        rconn, mconn, as_of)
+                        rconn, mconn, as_of, dyads=dyad_set,
+                        view=view, pill_by_dyad=pill_by_dyad)
                 finally:
                     mconn.close()
             finally:

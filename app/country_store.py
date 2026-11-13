@@ -20,12 +20,23 @@ Metrics (Dan, 2026-11-03, as agreed after review):
 - share_flagged: share of the country's dyads labelled hot,
   drifting, or atypical (gallery precedent), insufficient
   included in the denominator.
+- n_flagged: the flagged count behind that share.
+- pill_max: the highest validated exceedance (exc45_max from
+  the predictive build's dyad_predictive_summary at the
+  effective as-of) over the dyads feeding the country, when
+  the caller supplies a pill dict; null otherwise. Annotation
+  only — it never alters a rollup metric.
 
-Grouping is the involvement view (gallery precedent): a dyad
-counts toward BOTH its countries, so each dyad's volume
-counts twice panel-wide — captioned on the figure, never
-hidden. Ratios are computed from summed volumes, never
-averaged from dyad ratios. "Previous day" is the effective
+Grouping is the involvement view by default (gallery
+precedent): a dyad counts toward BOTH its countries, so each
+dyad's volume counts twice panel-wide — captioned on the
+figure, never hidden. The ``view`` argument can restrict each
+dyad to its target (iso2) or source (iso1) slot instead, and
+``dyads`` can scope the fold to a caller-supplied dyad set
+(the Scan context map): BOTH slices are scoped identically,
+so vol_change stays a like-for-like ratio. Ratios are
+computed from summed volumes, never averaged from dyad
+ratios. "Previous day" is the effective
 as-of: the latest rollup as-of <= requested (or latest
 overall); the prior slice resolves the same way at
 effective minus 7 days, and its actual as-of is returned.
@@ -292,6 +303,9 @@ def fetch_country_aggregates(
     rollup_conn: sqlite3.Connection,
     mirror_conn: sqlite3.Connection,
     as_of: str | None,
+    dyads: set[tuple[str, str]] | None = None,
+    view: str = "involvement",
+    pill_by_dyad: dict[tuple[str, str], float | None] | None = None,
 ) -> dict:
     effective = _latest_as_of(rollup_conn, as_of)
     if effective is None:
@@ -301,11 +315,18 @@ def fetch_country_aggregates(
     prior_date = (date.fromisoformat(effective) - timedelta(days=7))
     prior_as_of = _latest_as_of(rollup_conn, prior_date.isoformat())
 
-    # Per-country accumulators, involvement view: each dyad
-    # contributes to both its countries. `current` tracks the
-    # countries present in the current slice — a country seen
-    # only in the prior slice emits no row (all its current
-    # metrics would be null anyway).
+    def _feeds(iso1: str, iso2: str) -> tuple:
+        # Which country slot(s) a counted dyad feeds.
+        if view == "targets":
+            return (iso2,)
+        if view == "sources":
+            return (iso1,)
+        return (iso1, iso2)
+
+    # Per-country accumulators. `current` tracks the countries
+    # fed by the current slice — a country fed only in the
+    # prior slice emits no row (all its current metrics would
+    # be null anyway).
     acc: dict[str, dict] = {}
     current: set[str] = set()
 
@@ -313,14 +334,19 @@ def fetch_country_aggregates(
         slot = acc.get(country)
         if slot is None:
             slot = {"vol_now": 0.0, "vol_prior": 0.0, "temps": [],
-                    "label_counts": {}, "n_dyads": 0, "n_flagged": 0}
+                    "label_counts": {}, "n_dyads": 0, "n_flagged": 0,
+                    "pill_max": None}
             acc[country] = slot
         return slot
 
     for iso1, iso2, v_7d, _temp, label in rollup_conn.execute(
             _SLICE_SQL, (effective,)):
+        if dyads is not None and (iso1, iso2) not in dyads:
+            continue
         vol = float(v_7d) if v_7d is not None else 0.0
-        for country in (iso1, iso2):
+        pill = (pill_by_dyad.get((iso1, iso2))
+                if pill_by_dyad is not None else None)
+        for country in _feeds(iso1, iso2):
             if country is None:
                 continue
             current.add(country)
@@ -334,12 +360,18 @@ def fetch_country_aggregates(
                 counts[label] = counts.get(label, 0) + 1
             if _temp is not None and vol >= TEMP_VOLUME_FLOOR:
                 slot["temps"].append(float(_temp))
+            if pill is not None:
+                slot["pill_max"] = (
+                    pill if slot["pill_max"] is None
+                    else max(slot["pill_max"], pill))
 
     if prior_as_of is not None:
         for iso1, iso2, v_7d, _temp, _label in rollup_conn.execute(
                 _SLICE_SQL, (prior_as_of,)):
+            if dyads is not None and (iso1, iso2) not in dyads:
+                continue
             vol = float(v_7d) if v_7d is not None else 0.0
-            for country in (iso1, iso2):
+            for country in _feeds(iso1, iso2):
                 if country is None:
                     continue
                 _slot(country)["vol_prior"] += vol
@@ -375,8 +407,10 @@ def fetch_country_aggregates(
             "mode_label": mode_label,
             "n_sufficient": sum(slot["label_counts"].values()),
             "n_dyads": slot["n_dyads"],
+            "n_flagged": slot["n_flagged"],
             "share_flagged": (slot["n_flagged"] / slot["n_dyads"]
                               if slot["n_dyads"] else None),
+            "pill_max": slot["pill_max"],
         })
 
     features = _load_geometry(mirror_conn)
