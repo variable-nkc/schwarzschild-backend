@@ -153,11 +153,11 @@ def test_event_detail_aggregates(event_env):
     assert set(points) == {"City One", "City Two"}
     one = points["City One"]
     assert one["n_events"] == 2 and one["volume"] == 8
-    assert one["mean_tone"] == -2.5
-    assert one["median_tone"] == -2.5
-    # Tones -6 and +1: rounded buckets {-6,-5} and {1,2} tie
-    # at one event each; the tie resolves toward zero.
-    assert one["mode_tone"] == 1.5
+    # Tones -6 (4 articles) and +1 (1 article): plain median
+    # -2.5; articles-weighted median is the weight-4 event's
+    # tone itself.
+    assert one["tone_by_events"] == -2.5
+    assert one["tone_by_articles"] == -6
     assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
     # Articles-weighted median (ev1 has 4 articles, ev2 has 1):
@@ -169,11 +169,11 @@ def test_event_detail_aggregates(event_env):
         0.9804, abs=1e-3)
     two = points["City Two"]
     assert two["n_events"] == 3 and two["volume"] == 6
-    assert two["mean_tone"] == pytest.approx(-0.3333, abs=1e-3)
-    assert two["median_tone"] == 0.0
-    # Tones -3, 0, +2: the zero is excluded from the mode;
-    # {-4,-3} and {1,2} tie, toward zero wins.
-    assert two["mode_tone"] == 1.5
+    # Tones -3 (3 articles), 0 (1), +2 (2): plain median 0;
+    # articles-weighted median is -3 (its weight reaches the
+    # halfway crossing first).
+    assert two["tone_by_events"] == 0.0
+    assert two["tone_by_articles"] == -3
     # Median of {190, 030, 030} is the 030 simplex itself.
     assert two["by_events"]["median_phase"] == pytest.approx(
         1.7277, abs=1e-3)
@@ -201,18 +201,17 @@ def test_event_detail_aggregates(event_env):
                  {"sector": "MIL", "n": 1}],
     }
     assert w["tone"]["buckets"] == [1, 1, 1, 0, 3, 0]
-    assert w["tone"]["mean"] == pytest.approx(-2.3333, abs=1e-3)
-    assert w["tone"]["median"] == -1.5
-    assert w["tone"]["mode"] == 1.5
+    assert w["tone"]["median_by_events"] == -1.5
+    assert w["tone"]["median_by_articles"] == -3
     assert w["reporting"] == {
         "sources": 1.6667, "articles": 2.1667, "mentions": 2.8333}
     assert w["outlets"] == [
-        {"name": "news.example.com", "n": 2, "mean_tone": -4.5,
-         "median_tone": -4.5, "mode_tone": -3.5},
-        {"name": "other.org", "n": 2, "mean_tone": 0.5,
-         "median_tone": 0.5, "mode_tone": 1.5},
-        {"name": "third.io", "n": 1, "mean_tone": 2.0,
-         "median_tone": 2.0, "mode_tone": 1.5},
+        {"name": "news.example.com", "n": 2,
+         "tone_by_events": -4.5, "tone_by_articles": -6},
+        {"name": "other.org", "n": 2,
+         "tone_by_events": 0.5, "tone_by_articles": 0},
+        {"name": "third.io", "n": 1,
+         "tone_by_events": 2.0, "tone_by_articles": 2.0},
     ]
     assert w["actor_pairs"] == {
         "sources": ["GENERAL SOMEONE", "CAPITAL CITY"],
@@ -246,7 +245,8 @@ def test_event_detail_aggregates(event_env):
     w7 = data["windows"]["7"]
     assert w7["n_events"] == 3
     assert w7["n_mapped"] == 2
-    assert w7["tone"]["mean"] == pytest.approx(-4.3333, abs=1e-3)
+    assert w7["tone"]["median_by_events"] == -6
+    assert w7["tone"]["median_by_articles"] == -6
 
 
 def test_country_form_names(event_env):

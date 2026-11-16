@@ -51,15 +51,14 @@ mean-simplex variant both shipped briefly and were removed
 at Dan's direction; there is no fully unweighted variant —
 the by-events scheme is the record-count weighting.)
 
-Tone is aggregated three ways wherever it is displayed
-(Dan, 2026-11-16): the mean (the original), the median, and
-a modal bucket. The mode construction is Dan's: round
-init_avg_tone to 0 decimals (half away from zero), exclude
-rounded zeros entirely, bucket the rest into 2.0-point
-buckets ({1, 2}, {3, 4}, ... and {-2, -1}, {-4, -3}, ...),
-and report the modal bucket's midpoint; ties resolve toward
-the bucket closest to zero, then to the negative bucket. A
-group whose tones all round to zero has no mode (None).
+Tone is aggregated as the MEDIAN only, under both page
+weightings (Dan, 2026-11-16, replacing the mean/median/mode
+trio he had added that morning — he judged the pooled mean
+and the bucketed mode carried no discriminating variance):
+by_events is the plain median of the group's first-mention
+tones, each event counting once; by_articles weights each
+event by its min_num_articles and takes the
+halfway-crossing value, the rule the simplex medians use.
 
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
@@ -79,7 +78,6 @@ visible in the sector strip and subtype rollup.
 
 from __future__ import annotations
 
-import math
 import sqlite3
 import statistics
 from datetime import date, timedelta
@@ -170,46 +168,29 @@ def _country_form_names(
     return forms
 
 
-def _round0(value: float) -> int:
-    """Round to 0 decimals, half away from zero (the plain
-    reading of 'round to 0 decimals'; Python's round() would
-    banker's-round exact halves)."""
-    return int(math.floor(abs(value) + 0.5)) * (
-        -1 if value < 0 else 1)
+def _weighted_median(pairs: list[tuple[float, float]]) -> float:
+    """Halfway-crossing weighted median of (value, weight)
+    pairs — the rule the simplex medians use."""
+    ordered = sorted(pairs)
+    total = sum(w for _, w in ordered)
+    acc_w = 0.0
+    for value, w in ordered:
+        acc_w += w
+        if acc_w >= total / 2:
+            return float(value)
+    return float(ordered[-1][0])
 
 
-def _tone_mode(tones: list[float]) -> float | None:
-    """Modal 2.0-point bucket of the rounded tones, zeros
-    excluded, reported at the bucket midpoint (Dan's
-    construction; see the module docstring)."""
-    counts: dict[int, int] = {}
-    for tone in tones:
-        r = _round0(tone)
-        if r == 0:
-            continue
-        if r > 0:
-            low = (r - 1) // 2 * 2 + 1
-        else:
-            low = -(((-r - 1) // 2) * 2 + 2)
-        counts[low] = counts.get(low, 0) + 1
-    if not counts:
-        return None
-    best = max(
-        counts,
-        key=lambda lo: (counts[lo], -abs(lo + 0.5), -lo))
-    return best + 0.5
-
-
-def _tone_stats(tones: list[float]) -> dict:
-    """Mean / median / mode for a group of first-mention
-    tones (each rounded to 4 decimals; mode at its natural
-    1-decimal midpoint)."""
-    if not tones:
-        return {"mean": None, "median": None, "mode": None}
+def _tone_medians(pairs: list[tuple[float, float]]) -> dict:
+    """Median first-mention tone for one group under both
+    weightings (see the module docstring). Pairs are
+    (tone, min_num_articles)."""
+    if not pairs:
+        return {"by_events": None, "by_articles": None}
     return {
-        "mean": round(sum(tones) / len(tones), 4),
-        "median": round(statistics.median(tones), 4),
-        "mode": _tone_mode(tones),
+        "by_events": round(
+            float(statistics.median([t for t, _ in pairs])), 4),
+        "by_articles": round(_weighted_median(pairs), 4),
     }
 
 
@@ -227,12 +208,12 @@ class _Acc:
     slice the endpoint already materializes.
     """
 
-    __slots__ = ("n", "volume", "tones", "items")
+    __slots__ = ("n", "volume", "tone_pairs", "items")
 
     def __init__(self) -> None:
         self.n = 0
         self.volume = 0
-        self.tones: list[float] = []
+        self.tone_pairs: list[tuple[float, float]] = []
         self.items: list[tuple[tuple[float, ...], float]] = []
 
     @property
@@ -243,7 +224,8 @@ class _Acc:
         self.n += 1
         self.volume += row["mentions"] or 0
         if row["tone"] is not None:
-            self.tones.append(row["tone"])
+            self.tone_pairs.append(
+                (row["tone"], row["articles"] or 0))
         if simplex is not None:
             self.items.append((simplex, row["articles"] or 0))
 
@@ -303,7 +285,7 @@ def _window_payload(
     sectors: dict[str, int] = {}
     sectors_coded = 0
     tone_buckets = [0] * 6
-    tones_all: list[float] = []
+    tone_pairs_all: list[tuple[float, float]] = []
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
     outlets: dict[str, list] = {}
     pairs: dict[tuple[str, str], int] = {}
@@ -317,7 +299,8 @@ def _window_payload(
         if simplex is not None:
             n_mapped += 1
         if row["tone"] is not None:
-            tones_all.append(row["tone"])
+            tone_pairs_all.append(
+                (row["tone"], row["articles"] or 0))
             bucket = 0
             while bucket < 5 and row["tone"] >= TONE_EDGES[bucket]:
                 bucket += 1
@@ -329,7 +312,8 @@ def _window_payload(
             slot = outlets.setdefault(row["domain"], [0, []])
             slot[0] += 1
             if row["tone"] is not None:
-                slot[1].append(row["tone"])
+                slot[1].append(
+                    (row["tone"], row["articles"] or 0))
 
         if row["geo_id"] is not None and row["geo_type"]:
             if row["adm1"]:
@@ -375,14 +359,13 @@ def _window_payload(
 
     map_points = []
     for gid, acc in geo_acc.items():
-        stats = _tone_stats(acc.tones)
+        medians = _tone_medians(acc.tone_pairs)
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
             "volume": acc.volume,
-            "mean_tone": stats["mean"],
-            "median_tone": stats["median"],
-            "mode_tone": stats["mode"],
+            "tone_by_events": medians["by_events"],
+            "tone_by_articles": medians["by_articles"],
         }
         point.update(acc.composition())
         map_points.append(point)
@@ -455,7 +438,8 @@ def _window_payload(
         },
         "tone": {
             "buckets": tone_buckets,
-            **_tone_stats(tones_all),
+            **{f"median_{key}": value for key, value
+               in _tone_medians(tone_pairs_all).items()},
         },
         "reporting": {
             key: (round(val / n, 4) if n else None)
@@ -463,8 +447,8 @@ def _window_payload(
         },
         "outlets": [
             {"name": name, "n": slot[0],
-             **{f"{key}_tone": value
-                for key, value in _tone_stats(slot[1]).items()}}
+             **{f"tone_{key}": value
+                for key, value in _tone_medians(slot[1]).items()}}
             for name, slot in sorted(
                 outlets.items(), key=lambda kv: (-kv[1][0], kv[0]))[:8]
         ],
