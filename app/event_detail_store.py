@@ -973,11 +973,34 @@ def fetch_group_detail(
 
     per: dict[str, dict] = {}
     daily: dict[tuple[str, str], dict] = {}
+    membership: dict[str, dict] = {}
+
+    def _membership(code: str) -> dict:
+        # Lund state(s): the phases whose cleaned simplex
+        # share clears the page's state threshold (> 0.20).
+        # Set(s): the CAMEO sets containing the code. Both
+        # are crosswalk facts about the code, not statistics
+        # about the group (Dan, 2026-11-16).
+        if code not in membership:
+            simplex = clean.get(code)
+            membership[code] = {
+                "states": (
+                    [f"p{k + 1}" for k in range(5)
+                     if simplex[k] > STATE_THRESHOLD]
+                    if simplex is not None else []),
+                "sets": (
+                    [name for name in SET_ORDER
+                     if code in sets.get(name, ())]
+                    if sets is not None else []),
+            }
+        return membership[code]
+
     for r in sel:
         slot = per.setdefault(r["cameo_code"], {
             "code": r["cameo_code"],
             "label": (labels or {}).get(r["cameo_code"]),
             "n": 0, "first": r["d"], "last": r["d"],
+            **_membership(r["cameo_code"]),
         })
         slot["n"] += 1
         slot["first"] = min(slot["first"], r["d"])

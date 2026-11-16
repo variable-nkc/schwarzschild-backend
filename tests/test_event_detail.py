@@ -445,9 +445,13 @@ def test_group_detail_geo_and_state(event_env):
     assert g["last_date"] == "2026-09-30"
     assert g["cameo"] == [
         {"code": "030", "label": None, "n": 1,
-         "first": "2026-09-29", "last": "2026-09-29"},
+         "first": "2026-09-29", "last": "2026-09-29",
+         "states": ["p1", "p2"], "sets": ["stability"]},
         {"code": "190", "label": None, "n": 1,
-         "first": "2026-09-30", "last": "2026-09-30"},
+         "first": "2026-09-30", "last": "2026-09-30",
+         "states": ["p5"],
+         "sets": ["escalatory", "instability",
+                  "critical_incidents"]},
     ]
     assert g["daily"] == [
         {"date": "2026-09-29", "code": "030", "n": 1,
@@ -462,7 +466,10 @@ def test_group_detail_geo_and_state(event_env):
     assert g["n_events"] == 2
     assert g["cameo"] == [
         {"code": "190", "label": None, "n": 2,
-         "first": "2026-09-10", "last": "2026-09-30"},
+         "first": "2026-09-10", "last": "2026-09-30",
+         "states": ["p5"],
+         "sets": ["escalatory", "instability",
+                  "critical_incidents"]},
     ]
     # p3: 030's cleaned p3 is 0.198 — strictly-greater keeps
     # it out, so the state is empty in this fixture.
@@ -494,7 +501,9 @@ def test_group_detail_kinds(event_env):
     assert g["n_events"] == 3
     assert g["cameo"][0] == {"code": "030", "label": None,
                              "n": 2, "first": "2026-09-12",
-                             "last": "2026-09-15"}
+                             "last": "2026-09-15",
+                             "states": ["p1", "p2"],
+                             "sets": ["stability"]}
     g = _get_group(event_env, kind="actor_target",
                    key="TARGET CITY", **base)
     assert g["n_events"] == 5
@@ -509,7 +518,8 @@ def test_group_detail_kinds(event_env):
     assert g["n_events"] == 3
     assert g["cameo"] == [
         {"code": "030", "label": None, "n": 3,
-         "first": "2026-09-12", "last": "2026-09-29"},
+         "first": "2026-09-12", "last": "2026-09-29",
+         "states": ["p1", "p2"], "sets": ["stability"]},
     ]
     # Upper-inclusive edges (Dan's correction): the -8
     # event sits in bin 0 (t <= -8), the -6 event in bin 1.
