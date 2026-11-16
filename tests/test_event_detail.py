@@ -250,8 +250,8 @@ def test_event_detail_aggregates(event_env):
     # [-8, -6), [-6, -4), [-4, -2), >= -2. Fixture tones:
     # -8 (the unmapped event, 2 articles), -6 (4), -3 (3),
     # 0 (1), +1 (1), +2 (2).
-    assert w["tone"]["buckets"] == [0, 1, 1, 1, 3]
-    assert w["tone"]["bucket_articles"] == [0, 2, 4, 3, 4]
+    assert w["tone"]["buckets"] == [1, 1, 0, 1, 3]
+    assert w["tone"]["bucket_articles"] == [2, 4, 0, 3, 4]
     # Lund state shares: an event counts in a state when
     # its simplex puts > 0.20 on the phase. 030's simplex
     # (0.495, 0.297, 0.198, ...) holds p1 + p2; 190's holds
@@ -449,6 +449,12 @@ def test_group_detail_geo_and_state(event_env):
         {"code": "190", "label": None, "n": 1,
          "first": "2026-09-30", "last": "2026-09-30"},
     ]
+    assert g["daily"] == [
+        {"date": "2026-09-29", "code": "030", "n": 1,
+         "articles": 1},
+        {"date": "2026-09-30", "code": "190", "n": 1,
+         "articles": 4},
+    ]
     # Lund state p5 holds the two 190 events (#1, #4).
     g = _get_group(event_env, iso1="AAA", iso2="BBB",
                    as_of="2026-09-30", window="28", kind="state",
@@ -498,17 +504,22 @@ def test_group_detail_kinds(event_env):
     assert g["label"] == "CAPITAL CITY → TARGET CITY"
     g = _get_group(event_env, kind="region", key="AA2", **base)
     assert g["n_events"] == 3
-    # Tone bin 4 (>= -2): the +1, 0, +2 events, all 030.
+    # Tone bin 4 (> -2): the +1, 0, +2 events, all 030.
     g = _get_group(event_env, kind="tone_bin", key="4", **base)
     assert g["n_events"] == 3
     assert g["cameo"] == [
         {"code": "030", "label": None, "n": 3,
          "first": "2026-09-12", "last": "2026-09-29"},
     ]
-    # Tone bin 0 (< -8) is empty; the -8 event sits in bin 1.
-    g = _get_group(event_env, kind="tone_bin", key="1", **base)
+    # Upper-inclusive edges (Dan's correction): the -8
+    # event sits in bin 0 (t <= -8), the -6 event in bin 1.
+    g = _get_group(event_env, kind="tone_bin", key="0", **base)
     assert g["n_events"] == 1
     assert g["cameo"][0]["code"] == "999"
+    g = _get_group(event_env, kind="tone_bin", key="1", **base)
+    assert g["n_events"] == 1
+    assert g["cameo"][0]["code"] == "190"
+    assert g["first_date"] == "2026-09-30"
 
 
 def test_group_detail_bad_key_is_400(event_env):

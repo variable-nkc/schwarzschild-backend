@@ -127,11 +127,24 @@ from pathlib import Path
 from .dev_dda_store import JOINT_DELTA
 
 MAP_GEO_TYPES = ("WORLD_CITY", "US_CITY", "WORLD_STATE", "US_STATE")
-#: Tone histogram bins (Dan, 2026-11-16): five bins over
-#: the locked -10..0 scale — tone <= -8 ("8+"), then
-#: -8..-6, -6..-4, -4..-2, and everything above -2 ("< 2",
-#: positives included). Bucket index 0 is the severe end.
+#: Tone histogram bins (Dan, 2026-11-16; boundary rule
+#: corrected the same day at his direction): five bins
+#: over the locked -10..0 scale with UPPER-inclusive
+#: edges — tone <= -8 ("8+"), then (-8,-6], (-6,-4],
+#: (-4,-2], and everything above -2 ("< 2", positives
+#: included). A tone of exactly -2/-4/-6/-8 falls in the
+#: MORE severe bin. Bucket index 0 is the severe end.
 TONE_EDGES = (-8.0, -6.0, -4.0, -2.0)
+
+
+def _tone_bucket(tone: float) -> int:
+    """The tone's histogram bucket (severe-first). Shared
+    by the window payload and the group drill-down so the
+    tone bins can never drift apart."""
+    bucket = 0
+    while bucket < 4 and tone > TONE_EDGES[bucket]:
+        bucket += 1
+    return bucket
 #: A Lund state "holds" an event when the event's simplex
 #: puts strictly more than this on the phase (Dan,
 #: 2026-11-16). Strictness keeps near-uniform catch-all
@@ -437,9 +450,7 @@ def _window_payload(
         if row["tone"] is not None:
             tone_pairs_all.append(
                 (row["tone"], row["articles"] or 0))
-            bucket = 0
-            while bucket < 4 and row["tone"] >= TONE_EDGES[bucket]:
-                bucket += 1
+            bucket = _tone_bucket(row["tone"])
             tone_buckets[bucket] += 1
             tone_bucket_articles[bucket] += row["articles"] or 0
         rep["sources"] += row["sources"] or 0
@@ -896,7 +907,7 @@ def fetch_group_detail(
     base = {"iso1": iso1, "iso2": iso2, "as_of": as_of,
             "window": window, "kind": kind, "key": key,
             "label": key, "n_events": 0, "first_date": None,
-            "last_date": None, "cameo": []}
+            "last_date": None, "cameo": [], "daily": []}
     if as_of is None:
         return base
     rows, start28, start7, subtype_labels = _load_rows(
@@ -956,18 +967,12 @@ def fetch_group_detail(
             raise ValueError(f"bad tone_bin key {key!r}") from None
         if not 0 <= target <= 4:
             raise ValueError(f"bad tone_bin key {key!r}")
-
-        def _bucket(tone: float) -> int:
-            b = 0
-            while b < 4 and tone >= TONE_EDGES[b]:
-                b += 1
-            return b
-
         sel = [r for r in sub
                if r["tone"] is not None
-               and _bucket(r["tone"]) == target]
+               and _tone_bucket(r["tone"]) == target]
 
     per: dict[str, dict] = {}
+    daily: dict[tuple[str, str], dict] = {}
     for r in sel:
         slot = per.setdefault(r["cameo_code"], {
             "code": r["cameo_code"],
@@ -977,6 +982,12 @@ def fetch_group_detail(
         slot["n"] += 1
         slot["first"] = min(slot["first"], r["d"])
         slot["last"] = max(slot["last"], r["d"])
+        dslot = daily.setdefault((r["d"], r["cameo_code"]), {
+            "date": r["d"], "code": r["cameo_code"],
+            "n": 0, "articles": 0,
+        })
+        dslot["n"] += 1
+        dslot["articles"] += r["articles"] or 0
     if sel:
         base.update(
             n_events=len(sel),
@@ -984,5 +995,6 @@ def fetch_group_detail(
             last_date=max(r["d"] for r in sel),
             cameo=sorted(per.values(),
                          key=lambda c: (-c["n"], c["code"])),
+            daily=[daily[k] for k in sorted(daily)],
         )
     return base
