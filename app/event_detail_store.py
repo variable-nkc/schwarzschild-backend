@@ -497,6 +497,7 @@ def _window_payload(
     for gid, acc in geo_acc.items():
         point = {
             **geo_meta[gid],
+            "geo_id": gid,
             "n_events": acc.n,
             "articles": acc.articles,
             "volume": acc.volume,
