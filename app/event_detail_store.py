@@ -26,6 +26,14 @@ columns, so serve-time consistency argues for the backend copy.
 Catch-all codes (no simplex) count toward every volume figure
 and toward no composition; each window reports its mapped share.
 
+Only events whose geo lies in the source or target country are
+included (Dan, 2026-11-16: third-country locations confuse the
+page's readers); events with no resolved geo are excluded too.
+Two Lund summaries ride on every composition: the dominant
+phase of the aggregated mean simplex, and the modal phase —
+the most common per-event dominant phase (each event voting
+with the argmax of its own code's simplex).
+
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
 formal variants, and its demonym (RUSSIA / RUSSIAN / RUSSIAN
@@ -144,7 +152,8 @@ def _dominant(simplex: list[float]) -> int:
 class _Acc:
     """Running composition + volume over a group of events."""
 
-    __slots__ = ("n", "volume", "n_mapped", "simp", "tone_sum")
+    __slots__ = ("n", "volume", "n_mapped", "simp", "tone_sum",
+                 "phase_votes")
 
     def __init__(self) -> None:
         self.n = 0
@@ -152,6 +161,7 @@ class _Acc:
         self.n_mapped = 0
         self.simp = [0.0] * 5
         self.tone_sum = 0.0
+        self.phase_votes = [0] * 5
 
     def add(self, row: dict, simplex: tuple[float, ...] | None) -> None:
         self.n += 1
@@ -162,6 +172,7 @@ class _Acc:
             self.n_mapped += 1
             for k in range(5):
                 self.simp[k] += simplex[k]
+            self.phase_votes[_dominant(list(simplex)) - 1] += 1
 
     def composition(self) -> dict | None:
         if not self.n_mapped:
@@ -171,6 +182,8 @@ class _Acc:
             "simplex": [round(v, 6) for v in mean],
             "dominant_phase": _dominant(mean),
             "mean_phase": round(_mean_phase(mean), 4),
+            "modal_phase": max(
+                range(5), key=lambda k: self.phase_votes[k]) + 1,
         }
 
 
@@ -194,7 +207,8 @@ def _window_payload(
     tone_buckets = [0] * 6
     tone_sum = 0.0
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
-    outlets: dict[str, int] = {}
+    outlets: dict[str, list] = {}
+    pairs: dict[tuple[str, str], int] = {}
     xy_acc: dict[str, _Acc] = {}
     sub_acc: dict[str, _Acc] = {}
     sub_actors: dict[str, set[str]] = {}
@@ -214,7 +228,10 @@ def _window_payload(
         rep["articles"] += row["articles"] or 0
         rep["mentions"] += row["mentions"] or 0
         if row["domain"]:
-            outlets[row["domain"]] = outlets.get(row["domain"], 0) + 1
+            slot = outlets.setdefault(row["domain"], [0, 0.0])
+            slot[0] += 1
+            if row["tone"] is not None:
+                slot[1] += row["tone"]
 
         if row["geo_id"] is not None and row["geo_type"]:
             if row["adm1"]:
@@ -247,6 +264,10 @@ def _window_payload(
         name2 = row["actor2_name"]
         if name2 and name2 not in forms2:
             tgt_names[name2] = tgt_names.get(name2, 0) + 1
+        if (name1 and name1 not in forms1
+                and name2 and name2 not in forms2):
+            key = (name1, name2)
+            pairs[key] = pairs.get(key, 0) + 1
         parent = row["parent2"]
         if parent:
             sectors_coded += 1
@@ -291,8 +312,25 @@ def _window_payload(
             "n_actors": len(sub_actors.get(code, ())),
             "mean_phase": comp["mean_phase"] if comp else None,
             "dominant_phase": comp["dominant_phase"] if comp else None,
+            "modal_phase": comp["modal_phase"] if comp else None,
         })
     subtypes.sort(key=lambda r: r["n_events"], reverse=True)
+
+    pair_src: dict[str, int] = {}
+    pair_tgt: dict[str, int] = {}
+    for (s, t), count in pairs.items():
+        pair_src[s] = pair_src.get(s, 0) + count
+        pair_tgt[t] = pair_tgt.get(t, 0) + count
+    top_src = [name for name, _ in sorted(
+        pair_src.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
+    top_tgt = [name for name, _ in sorted(
+        pair_tgt.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
+    pair_rows = [
+        {"source": s, "target": t, "n": count}
+        for (s, t), count in sorted(
+            pairs.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        if s in top_src and t in top_tgt
+    ]
 
     def _ranked(names: dict[str, int], cap: int = 8) -> list[dict]:
         return [
@@ -325,7 +363,15 @@ def _window_payload(
             key: (round(val / n, 4) if n else None)
             for key, val in rep.items()
         },
-        "outlets": _ranked(outlets),
+        "outlets": [
+            {"name": name, "n": slot[0],
+             "mean_tone": round(slot[1] / slot[0], 4)}
+            for name, slot in sorted(
+                outlets.items(), key=lambda kv: (-kv[1][0], kv[0]))[:8]
+        ],
+        "actor_pairs": {
+            "sources": top_src, "targets": top_tgt, "rows": pair_rows,
+        },
         "actor_xy": xy[:60],
         "subtypes": {
             "coded_share": round(sub_coded / n, 4) if n else None,
@@ -333,6 +379,55 @@ def _window_payload(
         },
         "_adm1": adm1,
     }
+
+
+def _adm1_labels(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    adm1_compare: list[dict],
+) -> None:
+    """Attach a display label ("Moscow (RS48)") to each ADM1
+    row: users do not know ADM1 codes (Dan, 2026-11-16). Name
+    sources, in order: the COUNTRY geo's own name for a
+    country-level ADM1 ('Russia'); a WORLD_STATE / US_STATE
+    geo's name (first comma component) for a real region;
+    otherwise the ADM1 component parsed from the commonest
+    city geo name in the slice ('Moscow, Moskva, Russia' ->
+    'Moskva'). Falls back to the bare code when no name exists.
+    """
+    if not adm1_compare:
+        return
+    wanted = [row["adm1"] for row in adm1_compare]
+    state_names: dict[str, str] = {}
+    for adm1_code, full_name in conn.execute(
+        "SELECT adm1_code, full_name FROM gdelt_geos "
+        "WHERE type_code IN ('WORLD_STATE', 'US_STATE') "
+        f"AND adm1_code IN ({','.join('?' * len(wanted))})",
+        wanted,
+    ):
+        if adm1_code not in state_names and full_name:
+            state_names[adm1_code] = full_name.split(",")[0].strip()
+    country_names: dict[str, str] = {}
+    city_names: dict[str, dict[str, int]] = {}
+    for r in rows:
+        adm1 = r["adm1"]
+        if adm1 not in wanted or not r["geo_name"]:
+            continue
+        if r["geo_type"] == "COUNTRY":
+            country_names.setdefault(adm1, r["geo_name"])
+        else:
+            bucket = city_names.setdefault(adm1, {})
+            bucket[r["geo_name"]] = bucket.get(r["geo_name"], 0) + 1
+    for row in adm1_compare:
+        adm1 = row["adm1"]
+        name = country_names.get(adm1) or state_names.get(adm1)
+        if name is None and city_names.get(adm1):
+            commonest = max(
+                city_names[adm1].items(), key=lambda kv: kv[1])[0]
+            parts = commonest.split(", ")
+            name = (", ".join(parts[1:-1]) if len(parts) >= 3
+                    else parts[0])
+        row["label"] = f"{name} ({adm1})" if name else adm1
 
 
 def fetch_event_detail(
@@ -369,7 +464,7 @@ def fetch_event_detail(
                CAST(e.geo_id AS INTEGER) AS geo_id,
                g.full_name AS geo_name, g.adm1_code AS adm1,
                g.type_code AS geo_type, g.latitude AS lat,
-               g.longitude AS lon,
+               g.longitude AS lon, g.country_code AS geo_country,
                e.actor1_id AS a1, e.actor2_id AS a2,
                e.actor2_parent_code AS parent2,
                e.min_num_sources AS sources,
@@ -383,7 +478,11 @@ def fetch_event_detail(
         """,
         (start28, as_of, iso1, iso2),
     ).fetchall()
-    rows = [dict(r) for r in raw]
+    # Geo restriction (Dan, 2026-11-16): only events located in
+    # the source or target country; third-country locations and
+    # unresolved geos are excluded from every panel.
+    rows = [dict(r) for r in raw
+            if r["geo_country"] in (iso1, iso2)]
 
     # The mirror carries no index on gdelt_actors, so resolving
     # names is the expensive step if done naively: an IN(...)
@@ -454,6 +553,7 @@ def fetch_event_detail(
             adm1_by_window[28].items(), key=lambda kv: (-kv[1], kv[0])
         )[:8]
     ]
+    _adm1_labels(conn, rows, adm1_compare)
     return {
         "iso1": iso1, "iso2": iso2, "as_of": as_of,
         "windows": windows, "adm1_compare": adm1_compare,

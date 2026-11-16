@@ -30,6 +30,8 @@ def event_env(tmp_path, monkeypatch):
          TARGET CITY, parent BBB:GOV, 3/3/3, tone -3,
          news.example.com
       5. Aug 1 (outside), code 190 — excluded everywhere.
+      6. Sep 28, code 190, geo Far City (country CCC, outside
+         the dyad) — excluded by the geo-country restriction.
     """
     db = tmp_path / "mirror.sqlite"
     con = sqlite3.connect(db)
@@ -43,6 +45,7 @@ def event_env(tmp_path, monkeypatch):
             (1, "City One", "AAA", "AA1", 10.0, 20.0, "WORLD_CITY"),
             (2, "B-Land", "BBB", "BB", 30.0, 40.0, "COUNTRY"),
             (3, "City Two", "AAA", "AA2", 11.0, 21.0, "WORLD_CITY"),
+            (4, "Far City", "CCC", "CC1", 0.0, 0.0, "WORLD_CITY"),
         ],
     )
     con.execute(
@@ -95,6 +98,9 @@ def event_env(tmp_path, monkeypatch):
              "BBB:GOV-.-.", 3, 3, 3, -3.0, "https://news.example.com/z"),
             (5, "2026-08-01", "190", 1.0, 2, 5, "AAA", "BBB",
              "BBB:GOV-.-.", 9, 9, 9, 9.0, "https://old.example.com/"),
+            (6, "2026-09-28", "190", 4.0, 2, 5, "AAA", "BBB",
+             "BBB:GOV-.-.", 5, 5, 5, -1.0,
+             "https://news.example.com/w"),
         ],
     )
     con.commit()
@@ -137,14 +143,19 @@ def test_event_detail_aggregates(event_env):
     assert one["mean_tone"] == -2.5
     assert one["dominant_phase"] == 5
     assert one["mean_phase"] == pytest.approx(3.3394, abs=1e-3)
+    # Event-mode Lund: ev1 votes p5, ev2 votes p1 — the tie
+    # resolves to the lower phase, unlike the mean's dominant.
+    assert one["modal_phase"] == 1
     two = points["City Two"]
     assert two["n_events"] == 1 and two["volume"] == 3
     assert two["mean_phase"] == pytest.approx(4.9510, abs=1e-3)
+    assert two["modal_phase"] == 5
+    assert "Far City" not in points
 
     assert data["adm1_compare"] == [
-        {"adm1": "AA1", "n28": 2, "n7": 2},
-        {"adm1": "AA2", "n28": 1, "n7": 0},
-        {"adm1": "BB", "n28": 1, "n7": 1},
+        {"adm1": "AA1", "n28": 2, "n7": 2, "label": "City One (AA1)"},
+        {"adm1": "AA2", "n28": 1, "n7": 0, "label": "City Two (AA2)"},
+        {"adm1": "BB", "n28": 1, "n7": 1, "label": "B-Land (BB)"},
     ]
     assert w["actors_source"] == [
         {"name": "CAPITAL CITY", "n": 2},
@@ -161,9 +172,19 @@ def test_event_detail_aggregates(event_env):
     assert w["reporting"] == {
         "sources": 1.75, "articles": 2.5, "mentions": 3.5}
     assert w["outlets"] == [
-        {"name": "news.example.com", "n": 2},
-        {"name": "other.org", "n": 1},
+        {"name": "news.example.com", "n": 2, "mean_tone": -4.5},
+        {"name": "other.org", "n": 1, "mean_tone": 1.0},
     ]
+    assert w["actor_pairs"] == {
+        "sources": ["CAPITAL CITY", "GENERAL SOMEONE"],
+        "targets": ["TARGET CITY"],
+        "rows": [
+            {"source": "CAPITAL CITY", "target": "TARGET CITY",
+             "n": 1},
+            {"source": "GENERAL SOMEONE", "target": "TARGET CITY",
+             "n": 1},
+        ],
+    }
     assert len(w["actor_xy"]) == 1
     assert w["actor_xy"][0]["name"] == "CAPITAL CITY"
     assert w["actor_xy"][0]["n_events"] == 2
@@ -173,7 +194,9 @@ def test_event_detail_aggregates(event_env):
     assert subs["GOV"]["n_events"] == 2
     assert subs["GOV"]["n_actors"] == 1
     assert subs["GOV"]["label"] == "Government"
+    assert subs["GOV"]["modal_phase"] == 1
     assert subs["MIL"]["n_events"] == 1
+    assert subs["MIL"]["modal_phase"] == 5
 
     w7 = data["windows"]["7"]
     assert w7["n_events"] == 3
