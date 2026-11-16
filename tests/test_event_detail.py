@@ -174,6 +174,10 @@ def test_event_detail_aggregates(event_env):
     # 1/2 by events, 4 of 5 articles by articles.
     assert one["hot_share_by_events"] == 0.5
     assert one["hot_share_by_articles"] == 0.8
+    # Tilt: one hot-family event (190) vs one calm (030):
+    # 0 by events; 4/5 - 1/5 by articles.
+    assert one["tilt_by_events"] == 0.0
+    assert one["tilt_by_articles"] == 0.6
     assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
     # Articles-weighted median (ev1 has 4 articles, ev2 has 1):
@@ -192,6 +196,10 @@ def test_event_detail_aggregates(event_env):
     assert two["tone_by_articles"] == -3
     assert two["hot_share_by_events"] == 0.3333
     assert two["hot_share_by_articles"] == 0.5
+    # Tilt: 1/3 hot vs 2/3 calm by events; 3/6 vs 3/6 by
+    # articles.
+    assert two["tilt_by_events"] == -0.3333
+    assert two["tilt_by_articles"] == 0.0
     # Median of {190, 030, 030} is the 030 simplex itself.
     assert two["by_events"]["median_phase"] == pytest.approx(
         1.7277, abs=1e-3)
@@ -316,6 +324,8 @@ def test_event_detail_set_shares_degrade_without_groups(
     pt = data["windows"]["28"]["map_points"][0]
     assert pt["hot_share_by_events"] is None
     assert pt["hot_share_by_articles"] is None
+    assert pt["tilt_by_events"] is None
+    assert pt["tilt_by_articles"] is None
 
 
 def test_country_form_names(event_env):

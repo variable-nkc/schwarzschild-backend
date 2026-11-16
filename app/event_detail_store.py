@@ -85,7 +85,16 @@ Dan asked for the SUM of the two sets' shares; it is
 computed as the union share instead, because 7 codes sit
 in both sets and the literal sum double-counts their
 events (it can exceed 1 — a colour scale needs a share).
-Without set membership the hot shares are None.
+Without set membership the hot shares are None. Each
+point also carries tilt_by_events / tilt_by_articles:
+the hot-family share (escalatory ∪ instability ∪
+critical_incidents) minus the calm-family share
+(stability ∪ deescalatory) at that point — a lean index
+in the app's balance grammar, added so a dyad that is
+unstable-but-not-severe (CHN_TWN) reads differently from
+a calm one (CHN_USA), which the severe share alone
+cannot distinguish. 33 codes sit in both families, so
+the tilt is a difference of marginals, not a partition.
 
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
@@ -322,9 +331,15 @@ def _window_payload(
     outlets: dict[str, _Acc] = {}
     geo_hot: dict[int, list[int]] = {}
     hot_codes: set[str] = set()
+    calm_codes: set[str] = set()
+    tilt_hot_codes: set[str] = set()
     if sets is not None:
         hot_codes = (set(sets.get("critical_incidents", ()))
                      | set(sets.get("escalatory", ())))
+        calm_codes = (set(sets.get("stability", ()))
+                      | set(sets.get("deescalatory", ())))
+        tilt_hot_codes = (hot_codes
+                          | set(sets.get("instability", ())))
     pairs: dict[tuple[str, str], int] = {}
     xy_acc: dict[str, _Acc] = {}
     sub_acc: dict[str, _Acc] = {}
@@ -373,11 +388,20 @@ def _window_payload(
                     }
                 geo_acc[gid].add(row, simplex)
                 if sets is not None:
-                    hot = geo_hot.setdefault(gid, [0, 0, 0])
-                    hot[2] += row["articles"] or 0
+                    # [severe_n, severe_a, tilt_hot_n,
+                    #  tilt_hot_a, calm_n, calm_a, all_a]
+                    hot = geo_hot.setdefault(
+                        gid, [0, 0, 0, 0, 0, 0, 0])
+                    hot[6] += row["articles"] or 0
                     if row["cameo_code"] in hot_codes:
                         hot[0] += 1
                         hot[1] += row["articles"] or 0
+                    if row["cameo_code"] in tilt_hot_codes:
+                        hot[2] += 1
+                        hot[3] += row["articles"] or 0
+                    if row["cameo_code"] in calm_codes:
+                        hot[4] += 1
+                        hot[5] += row["articles"] or 0
 
         name1 = row["actor1_name"]
         if name1:
@@ -408,7 +432,9 @@ def _window_payload(
     map_points = []
     for gid, acc in geo_acc.items():
         medians = _tone_medians(acc.tone_pairs)
-        hot_n, hot_a, all_a = geo_hot.get(gid, [0, 0, 0])
+        (hot_n, hot_a, thot_n, thot_a,
+         calm_n, calm_a, all_a) = geo_hot.get(
+            gid, [0, 0, 0, 0, 0, 0, 0])
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
@@ -420,6 +446,12 @@ def _window_payload(
                 if sets is not None and acc.n else None),
             "hot_share_by_articles": (
                 round(hot_a / all_a, 4)
+                if sets is not None and all_a else None),
+            "tilt_by_events": (
+                round(thot_n / acc.n - calm_n / acc.n, 4)
+                if sets is not None and acc.n else None),
+            "tilt_by_articles": (
+                round(thot_a / all_a - calm_a / all_a, 4)
                 if sets is not None and all_a else None),
         }
         point.update(acc.composition())
