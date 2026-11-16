@@ -743,6 +743,75 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/event-detail", response_model=None)
+    def dev_event_detail(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # DEV ONLY: event-level aggregates for one dyad from
+        # the poc_base mirror (Event detail page, Dan
+        # 2026-11-16): map points, ADM1 counts, named actors,
+        # sectors, tone, outlets, actor compositions, subtype
+        # rollup over the 7/28 days ending at the as-of.
+        # Needs the mirror AND the simplexes file (the Lund
+        # crosswalk the rest of the backend serves); either
+        # unset means 503, same discipline as the other dev
+        # endpoints. Same version gate.
+        from . import event_detail_store
+
+        mirror = config.mirror_path()
+        simplexes_p = config.dda_simplexes_path()
+        if mirror is None or simplexes_p is None:
+            missing = [
+                n
+                for n, p in (("MIRROR_SQLITE", mirror),
+                             ("DDA_SIMPLEXES_JSON", simplexes_p))
+                if p is None
+            ]
+            provenance = Provenance(
+                source="dev",
+                message="DEV ONLY — not part of the v1 contract. "
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+            warnings, error = _version_gate(provenance, api_version)
+            if error is not None:
+                return error
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+        provenance = Provenance(
+            source="dev",
+            message="DEV ONLY — not part of the v1 contract.",
+        )
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if not mirror.exists() or not simplexes_p.exists():
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                "Configured mirror or simplexes file not found.",
+            )
+        try:
+            conn = event_detail_store.connect(mirror)
+            try:
+                simplexes = dev_dda_store.load_simplexes(simplexes_p)
+                data = event_detail_store.fetch_event_detail(
+                    conn, simplexes, iso1, iso2, as_of)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read mirror: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     @app.get("/dev/health", response_model=None)
     def dev_health(
         as_of: str | None = Query(default=None),
