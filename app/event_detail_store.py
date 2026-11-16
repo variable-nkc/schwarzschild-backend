@@ -32,11 +32,20 @@ page's readers); events with no resolved geo are excluded too.
 Every composition is computed under two weightings (Dan,
 2026-11-16): by unique events — each matching record in the
 mirror counts once — and by articles — each record weighted
-by its min_num_articles. Both report the mean simplex, its
-dominant phase, and the mean phase. (A per-event modal-phase
-variant shipped briefly and was removed at Dan's direction;
-there is no fully unweighted variant — the by-events scheme
-is the record-count weighting.)
+by its min_num_articles. The composition itself is the
+component-wise MEDIAN simplex across the group's mapped
+events (Dan, 2026-11-16, replacing the mean after he reviewed
+the Ottawa/USA_CAN case): each phase's value is the median
+of that component (the articles-weighted median under the
+articles weighting), renormalized to sum to 1 so it stays a
+simplex; the summary reports that simplex, its dominant
+phase, and its median phase (the phase centroid of the
+median simplex). Component-wise medians mix components from
+different events by construction — that is the statistic
+Dan reviewed. (A per-event modal-phase variant and the
+mean-simplex variant both shipped briefly and were removed
+at Dan's direction; there is no fully unweighted variant —
+the by-events scheme is the record-count weighting.)
 
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
@@ -57,6 +66,7 @@ visible in the sector strip and subtype rollup.
 from __future__ import annotations
 
 import sqlite3
+import statistics
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -154,20 +164,26 @@ def _dominant(simplex: list[float]) -> int:
 
 
 class _Acc:
-    """Running composition + volume over a group of events,
-    under both weightings (per unique event; per article)."""
+    """Running composition + volume over a group of events.
 
-    __slots__ = ("n", "volume", "n_mapped", "tone_sum",
-                 "simp_events", "simp_articles", "w_articles")
+    Mapped events keep their (simplex, articles) pairs: the
+    composition is a component-wise median, which cannot be
+    accumulated as a running sum. Group sizes are bounded by
+    the window slice, so the storage is proportional to the
+    slice the endpoint already materializes.
+    """
+
+    __slots__ = ("n", "volume", "tone_sum", "items")
 
     def __init__(self) -> None:
         self.n = 0
         self.volume = 0
-        self.n_mapped = 0
         self.tone_sum = 0.0
-        self.simp_events = [0.0] * 5
-        self.simp_articles = [0.0] * 5
-        self.w_articles = 0.0
+        self.items: list[tuple[tuple[float, ...], float]] = []
+
+    @property
+    def n_mapped(self) -> int:
+        return len(self.items)
 
     def add(self, row: dict, simplex: tuple[float, ...] | None) -> None:
         self.n += 1
@@ -175,30 +191,44 @@ class _Acc:
         if row["tone"] is not None:
             self.tone_sum += row["tone"]
         if simplex is not None:
-            self.n_mapped += 1
-            articles = row["articles"] or 0
-            self.w_articles += articles
-            for k in range(5):
-                self.simp_events[k] += simplex[k]
-                self.simp_articles[k] += simplex[k] * articles
+            self.items.append((simplex, row["articles"] or 0))
 
-    @staticmethod
-    def _summarize(sums: list[float], weight: float) -> dict | None:
-        if not weight:
+    def _summarize(self, weighted: bool) -> dict | None:
+        if not self.items:
             return None
-        mean = [v / weight for v in sums]
+        if weighted and not sum(a for _, a in self.items):
+            return None
+        med: list[float] = []
+        for k in range(5):
+            if weighted:
+                pairs = sorted(
+                    (sx[k], art) for sx, art in self.items)
+                total = sum(w for _, w in pairs)
+                acc_w = 0.0
+                value = pairs[-1][0]
+                for v, w in pairs:
+                    acc_w += w
+                    if acc_w >= total / 2:
+                        value = v
+                        break
+                med.append(value)
+            else:
+                med.append(statistics.median(
+                    [sx[k] for sx, _ in self.items]))
+        total = sum(med)
+        if total <= 0:
+            return None
+        simplex = [v / total for v in med]
         return {
-            "simplex": [round(v, 6) for v in mean],
-            "dominant_phase": _dominant(mean),
-            "mean_phase": round(_mean_phase(mean), 4),
+            "simplex": [round(v, 6) for v in simplex],
+            "dominant_phase": _dominant(simplex),
+            "median_phase": round(_mean_phase(simplex), 4),
         }
 
     def composition(self) -> dict:
         return {
-            "by_events": self._summarize(
-                self.simp_events, float(self.n_mapped)),
-            "by_articles": self._summarize(
-                self.simp_articles, self.w_articles),
+            "by_events": self._summarize(weighted=False),
+            "by_articles": self._summarize(weighted=True),
         }
 
 

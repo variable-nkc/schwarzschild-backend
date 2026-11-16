@@ -32,6 +32,15 @@ def event_env(tmp_path, monkeypatch):
       5. Aug 1 (outside), code 190 — excluded everywhere.
       6. Sep 28, code 190, geo Far City (country CCC, outside
          the dyad) — excluded by the geo-country restriction.
+      7. Sep 12, code 030, geo City Two, GENERAL SOMEONE ->
+         TARGET CITY, parent BBB:GOV, 1/1/1, tone 0, other.org
+      8. Sep 15, code 030, geo City Two, GENERAL SOMEONE ->
+         TARGET CITY, parent BBB:GOV, 2/2/2, tone +2, third.io
+
+    City Two therefore holds three mapped events (one 190,
+    two 030): its by-events median simplex is the 030 simplex
+    itself (median phase 1.7277, dominant p1) where the mean
+    would give 2.8021 — the median/mean discriminator.
     """
     db = tmp_path / "mirror.sqlite"
     con = sqlite3.connect(db)
@@ -101,6 +110,10 @@ def event_env(tmp_path, monkeypatch):
             (6, "2026-09-28", "190", 4.0, 2, 5, "AAA", "BBB",
              "BBB:GOV-.-.", 5, 5, 5, -1.0,
              "https://news.example.com/w"),
+            (7, "2026-09-12", "030", 3.0, 3, 5, "AAA", "BBB",
+             "BBB:GOV-.-.", 1, 1, 1, 0.0, "https://other.org/a"),
+            (8, "2026-09-15", "030", 3.0, 3, 5, "AAA", "BBB",
+             "BBB:GOV-.-.", 2, 2, 2, 2.0, "https://third.io/b"),
         ],
     )
     con.commit()
@@ -131,9 +144,9 @@ def test_event_detail_aggregates(event_env):
     data = _get(event_env, iso1="AAA", iso2="BBB", as_of="2026-09-30")
     assert data["as_of"] == "2026-09-30"
     w = data["windows"]["28"]
-    assert w["n_events"] == 4
-    assert w["n_mapped"] == 3
-    assert w["mapped_share"] == 0.75
+    assert w["n_events"] == 6
+    assert w["n_mapped"] == 5
+    assert w["mapped_share"] == 0.8333
     assert w["n_country_geo"] == 1
 
     points = {p["name"]: p for p in w["map_points"]}
@@ -142,71 +155,85 @@ def test_event_detail_aggregates(event_env):
     assert one["n_events"] == 2 and one["volume"] == 8
     assert one["mean_tone"] == -2.5
     assert one["by_events"]["dominant_phase"] == 5
-    assert one["by_events"]["mean_phase"] == pytest.approx(
+    assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
-    # Articles weighting (ev1 has 4 articles, ev2 has 1) pulls
-    # the composition toward ev1's near-pure p5 simplex.
+    # Articles-weighted median (ev1 has 4 articles, ev2 has 1):
+    # the weight-4 event's simplex is the median on every
+    # component, so the composition is ev1's near-pure p5.
     assert one["by_articles"]["dominant_phase"] == 5
-    assert one["by_articles"]["mean_phase"] == pytest.approx(
-        4.3063, abs=1e-3)
+    assert one["by_articles"]["median_phase"] == pytest.approx(
+        4.9510, abs=1e-3)
     assert one["by_articles"]["simplex"][4] == pytest.approx(
-        0.7853, abs=1e-3)
+        0.9804, abs=1e-3)
     two = points["City Two"]
-    assert two["n_events"] == 1 and two["volume"] == 3
-    assert two["by_events"]["mean_phase"] == pytest.approx(
-        4.9510, abs=1e-3)
-    assert two["by_articles"]["mean_phase"] == pytest.approx(
-        4.9510, abs=1e-3)
+    assert two["n_events"] == 3 and two["volume"] == 6
+    assert two["mean_tone"] == pytest.approx(-0.3333, abs=1e-3)
+    # Median of {190, 030, 030} is the 030 simplex itself.
+    assert two["by_events"]["dominant_phase"] == 1
+    assert two["by_events"]["median_phase"] == pytest.approx(
+        1.7277, abs=1e-3)
+    assert two["by_events"]["simplex"][0] == pytest.approx(
+        0.49505, abs=1e-3)
+    # Articles-weighted median mixes components across events
+    # and needs the renormalization (raw sum 0.0246).
+    assert two["by_articles"]["dominant_phase"] == 5
+    assert two["by_articles"]["median_phase"] == pytest.approx(
+        3.0039, abs=1e-3)
     assert "Far City" not in points
 
     assert data["adm1_compare"] == [
+        {"adm1": "AA2", "n28": 3, "n7": 0, "label": "City Two (AA2)"},
         {"adm1": "AA1", "n28": 2, "n7": 2, "label": "City One (AA1)"},
-        {"adm1": "AA2", "n28": 1, "n7": 0, "label": "City Two (AA2)"},
         {"adm1": "BB", "n28": 1, "n7": 1, "label": "B-Land (BB)"},
     ]
     assert w["actors_source"] == [
+        {"name": "GENERAL SOMEONE", "n": 3},
         {"name": "CAPITAL CITY", "n": 2},
-        {"name": "GENERAL SOMEONE", "n": 1},
     ]
-    assert w["actors_target"] == [{"name": "TARGET CITY", "n": 3}]
+    assert w["actors_target"] == [{"name": "TARGET CITY", "n": 5}]
     assert w["target_sectors"] == {
-        "coded": 3,
-        "rows": [{"sector": "GOV", "n": 2},
+        "coded": 5,
+        "rows": [{"sector": "GOV", "n": 4},
                  {"sector": "MIL", "n": 1}],
     }
-    assert w["tone"]["buckets"] == [1, 1, 1, 0, 1, 0]
-    assert w["tone"]["mean"] == -4.0
+    assert w["tone"]["buckets"] == [1, 1, 1, 0, 3, 0]
+    assert w["tone"]["mean"] == pytest.approx(-2.3333, abs=1e-3)
     assert w["reporting"] == {
-        "sources": 1.75, "articles": 2.5, "mentions": 3.5}
+        "sources": 1.6667, "articles": 2.1667, "mentions": 2.8333}
     assert w["outlets"] == [
         {"name": "news.example.com", "n": 2, "mean_tone": -4.5},
-        {"name": "other.org", "n": 1, "mean_tone": 1.0},
+        {"name": "other.org", "n": 2, "mean_tone": 0.5},
+        {"name": "third.io", "n": 1, "mean_tone": 2.0},
     ]
     assert w["actor_pairs"] == {
-        "sources": ["CAPITAL CITY", "GENERAL SOMEONE"],
+        "sources": ["GENERAL SOMEONE", "CAPITAL CITY"],
         "targets": ["TARGET CITY"],
         "rows": [
-            {"source": "CAPITAL CITY", "target": "TARGET CITY",
-             "n": 1},
             {"source": "GENERAL SOMEONE", "target": "TARGET CITY",
+             "n": 3},
+            {"source": "CAPITAL CITY", "target": "TARGET CITY",
              "n": 1},
         ],
     }
-    assert len(w["actor_xy"]) == 1
-    assert w["actor_xy"][0]["name"] == "CAPITAL CITY"
-    assert w["actor_xy"][0]["n_events"] == 2
+    assert len(w["actor_xy"]) == 2
+    assert w["actor_xy"][0]["name"] == "GENERAL SOMEONE"
+    assert w["actor_xy"][0]["n_events"] == 3
+    assert w["actor_xy"][0]["by_events"]["median_phase"] == (
+        pytest.approx(1.7277, abs=1e-3))
 
     subs = {r["code"]: r for r in w["subtypes"]["rows"]}
-    assert w["subtypes"]["coded_share"] == 0.75
+    assert w["subtypes"]["coded_share"] == 0.8333
     assert subs["GOV"]["n_events"] == 2
     assert subs["GOV"]["n_actors"] == 1
     assert subs["GOV"]["label"] == "Government"
-    assert subs["GOV"]["by_events"]["mean_phase"] == (
+    assert subs["GOV"]["by_events"]["median_phase"] == (
         pytest.approx(3.3394, abs=1e-3))
-    assert subs["GOV"]["by_articles"]["mean_phase"] == (
-        pytest.approx(4.3063, abs=1e-3))
-    assert subs["MIL"]["n_events"] == 1
-    assert subs["MIL"]["by_events"]["dominant_phase"] == 5
+    assert subs["GOV"]["by_articles"]["median_phase"] == (
+        pytest.approx(4.9510, abs=1e-3))
+    assert subs["MIL"]["n_events"] == 3
+    assert subs["MIL"]["by_events"]["dominant_phase"] == 1
+    assert subs["MIL"]["by_events"]["median_phase"] == (
+        pytest.approx(1.7277, abs=1e-3))
 
     w7 = data["windows"]["7"]
     assert w7["n_events"] == 3
@@ -235,7 +262,7 @@ def test_country_form_names(event_env):
 def test_event_detail_default_as_of(event_env):
     data = _get(event_env, iso1="AAA", iso2="BBB")
     assert data["as_of"] == "2026-09-30"
-    assert data["windows"]["28"]["n_events"] == 4
+    assert data["windows"]["28"]["n_events"] == 6
 
 
 def test_event_detail_unknown_dyad(event_env):
