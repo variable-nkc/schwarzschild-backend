@@ -170,6 +170,10 @@ def test_event_detail_aggregates(event_env):
     # tone itself.
     assert one["tone_by_events"] == -2.5
     assert one["tone_by_articles"] == -6
+    # One of City One's two events is a 190 (hot-union):
+    # 1/2 by events, 4 of 5 articles by articles.
+    assert one["hot_share_by_events"] == 0.5
+    assert one["hot_share_by_articles"] == 0.8
     assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
     # Articles-weighted median (ev1 has 4 articles, ev2 has 1):
@@ -186,6 +190,8 @@ def test_event_detail_aggregates(event_env):
     # halfway crossing first).
     assert two["tone_by_events"] == 0.0
     assert two["tone_by_articles"] == -3
+    assert two["hot_share_by_events"] == 0.3333
+    assert two["hot_share_by_articles"] == 0.5
     # Median of {190, 030, 030} is the 030 simplex itself.
     assert two["by_events"]["median_phase"] == pytest.approx(
         1.7277, abs=1e-3)
@@ -217,14 +223,21 @@ def test_event_detail_aggregates(event_env):
     assert w["tone"]["median_by_articles"] == -3
     assert w["reporting"] == {
         "sources": 1.6667, "articles": 2.1667, "mentions": 2.8333}
-    assert w["outlets"] == [
-        {"name": "news.example.com", "n": 2,
-         "tone_by_events": -4.5, "tone_by_articles": -6},
-        {"name": "other.org", "n": 2,
-         "tone_by_events": 0.5, "tone_by_articles": 0},
-        {"name": "third.io", "n": 1,
-         "tone_by_events": 2.0, "tone_by_articles": 2.0},
-    ]
+    outs = {o["name"]: o for o in w["outlets"]}
+    assert outs["news.example.com"]["n"] == 2
+    assert outs["news.example.com"]["tone_by_events"] == -4.5
+    assert outs["news.example.com"]["tone_by_articles"] == -6
+    # Both news events are 190s: the outlet's composition is
+    # the near-pure p5 simplex under either weighting.
+    assert outs["news.example.com"]["by_events"][
+        "median_phase"] == pytest.approx(4.9510, abs=1e-3)
+    assert outs["other.org"]["tone_by_events"] == 0.5
+    assert outs["other.org"]["tone_by_articles"] == 0
+    # Both other.org events are 030s.
+    assert outs["other.org"]["by_events"][
+        "median_phase"] == pytest.approx(1.7277, abs=1e-3)
+    assert outs["third.io"]["by_articles"][
+        "median_phase"] == pytest.approx(1.7277, abs=1e-3)
     assert w["actor_pairs"] == {
         "sources": ["GENERAL SOMEONE", "CAPITAL CITY"],
         "targets": ["TARGET CITY"],
@@ -240,6 +253,13 @@ def test_event_detail_aggregates(event_env):
     assert w["actor_xy"][0]["n_events"] == 3
     assert w["actor_xy"][0]["by_events"]["median_phase"] == (
         pytest.approx(1.7277, abs=1e-3))
+    # GENERAL SOMEONE's tones: -3 (3 art), 0 (1), +2 (2).
+    assert w["actor_xy"][0]["tone_by_events"] == 0.0
+    assert w["actor_xy"][0]["tone_by_articles"] == -3
+    xy1 = w["actor_xy"][1]
+    assert xy1["name"] == "CAPITAL CITY"
+    assert xy1["tone_by_events"] == -2.5
+    assert xy1["tone_by_articles"] == -6
 
     subs = {r["code"]: r for r in w["subtypes"]["rows"]}
     assert w["subtypes"]["coded_share"] == 0.8333
@@ -293,6 +313,9 @@ def test_event_detail_set_shares_degrade_without_groups(
                 as_of="2026-09-30")
     assert data["windows"]["28"]["set_shares"] is None
     assert data["windows"]["28"]["n_events"] == 6
+    pt = data["windows"]["28"]["map_points"][0]
+    assert pt["hot_share_by_events"] is None
+    assert pt["hot_share_by_articles"] is None
 
 
 def test_country_form_names(event_env):

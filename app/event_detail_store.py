@@ -73,6 +73,20 @@ membership the window's set_shares is None and the page
 shows a note instead — the rest of the page does not
 depend on the groups file.
 
+Colouring supplements (Dan, 2026-11-16): source-actor
+rows also carry their tone medians (the actor figure
+colours by tone, Lund being its y-axis); outlet rows
+carry a full Lund composition alongside their tone
+medians (the outlets chart can colour by either); and
+each map point carries hot_share_by_events /
+hot_share_by_articles — the share of the point's own
+events whose code is in critical_incidents ∪ escalatory.
+Dan asked for the SUM of the two sets' shares; it is
+computed as the union share instead, because 7 codes sit
+in both sets and the literal sum double-counts their
+events (it can exceed 1 — a colour scale needs a share).
+Without set membership the hot shares are None.
+
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
 formal variants, and its demonym (RUSSIA / RUSSIAN / RUSSIAN
@@ -305,7 +319,12 @@ def _window_payload(
     tone_buckets = [0] * 6
     tone_pairs_all: list[tuple[float, float]] = []
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
-    outlets: dict[str, list] = {}
+    outlets: dict[str, _Acc] = {}
+    geo_hot: dict[int, list[int]] = {}
+    hot_codes: set[str] = set()
+    if sets is not None:
+        hot_codes = (set(sets.get("critical_incidents", ()))
+                     | set(sets.get("escalatory", ())))
     pairs: dict[tuple[str, str], int] = {}
     xy_acc: dict[str, _Acc] = {}
     sub_acc: dict[str, _Acc] = {}
@@ -335,11 +354,8 @@ def _window_payload(
         rep["articles"] += row["articles"] or 0
         rep["mentions"] += row["mentions"] or 0
         if row["domain"]:
-            slot = outlets.setdefault(row["domain"], [0, []])
-            slot[0] += 1
-            if row["tone"] is not None:
-                slot[1].append(
-                    (row["tone"], row["articles"] or 0))
+            acc_o = outlets.setdefault(row["domain"], _Acc())
+            acc_o.add(row, simplex)
 
         if row["geo_id"] is not None and row["geo_type"]:
             if row["adm1"]:
@@ -356,6 +372,12 @@ def _window_payload(
                         "lon": row["lon"],
                     }
                 geo_acc[gid].add(row, simplex)
+                if sets is not None:
+                    hot = geo_hot.setdefault(gid, [0, 0, 0])
+                    hot[2] += row["articles"] or 0
+                    if row["cameo_code"] in hot_codes:
+                        hot[0] += 1
+                        hot[1] += row["articles"] or 0
 
         name1 = row["actor1_name"]
         if name1:
@@ -386,12 +408,19 @@ def _window_payload(
     map_points = []
     for gid, acc in geo_acc.items():
         medians = _tone_medians(acc.tone_pairs)
+        hot_n, hot_a, all_a = geo_hot.get(gid, [0, 0, 0])
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
             "volume": acc.volume,
             "tone_by_events": medians["by_events"],
             "tone_by_articles": medians["by_articles"],
+            "hot_share_by_events": (
+                round(hot_n / acc.n, 4)
+                if sets is not None and acc.n else None),
+            "hot_share_by_articles": (
+                round(hot_a / all_a, 4)
+                if sets is not None and all_a else None),
         }
         point.update(acc.composition())
         map_points.append(point)
@@ -404,8 +433,11 @@ def _window_payload(
         comp = acc.composition()
         if comp["by_events"] is None:
             continue
+        medians = _tone_medians(acc.tone_pairs)
         xy.append({
             "name": name, "n_events": acc.n, "volume": acc.volume,
+            "tone_by_events": medians["by_events"],
+            "tone_by_articles": medians["by_articles"],
             **comp,
         })
     xy.sort(key=lambda r: r["n_events"], reverse=True)
@@ -489,11 +521,13 @@ def _window_payload(
             for key, val in rep.items()
         },
         "outlets": [
-            {"name": name, "n": slot[0],
+            {"name": name, "n": acc_o.n,
              **{f"tone_{key}": value
-                for key, value in _tone_medians(slot[1]).items()}}
-            for name, slot in sorted(
-                outlets.items(), key=lambda kv: (-kv[1][0], kv[0]))[:8]
+                for key, value
+                in _tone_medians(acc_o.tone_pairs).items()},
+             **acc_o.composition()}
+            for name, acc_o in sorted(
+                outlets.items(), key=lambda kv: (-kv[1].n, kv[0]))[:8]
         ],
         "actor_pairs": {
             "sources": top_src, "targets": top_tgt, "rows": pair_rows,
