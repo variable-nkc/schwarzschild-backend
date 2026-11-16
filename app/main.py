@@ -823,6 +823,104 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/event-detail/group", response_model=None)
+    def dev_event_detail_group(
+        iso1: str = Query(..., min_length=1),
+        iso2: str = Query(..., min_length=1),
+        as_of: str | None = Query(default=None),
+        window: str = Query(..., pattern="^(7|28)$"),
+        kind: str = Query(
+            ...,
+            pattern="^(geo|region|actor_source|actor_target|"
+                    "pair|outlet|subtype|set|state|tone_bin)$"),
+        key: str = Query(..., min_length=1),
+        api_version: str | None = Query(
+            default=None,
+            description="Expected payload contract version.",
+        ),
+    ) -> JSONResponse | dict:
+        # DEV ONLY: CAMEO-level drill-down for one group on
+        # the Event detail page (Dan, 2026-11-16) — the
+        # group's events in the window counted per CAMEO
+        # code with first/last observed dates; counts and
+        # dates only. Same mirror + simplexes gate as
+        # /dev/event-detail; kind=set additionally needs
+        # DDA_SETS_JSON. A malformed key is a 400.
+        from . import event_detail_store
+
+        mirror = config.mirror_path()
+        simplexes_p = config.dda_simplexes_path()
+        if mirror is None or simplexes_p is None:
+            missing = [
+                n
+                for n, p in (("MIRROR_SQLITE", mirror),
+                             ("DDA_SIMPLEXES_JSON", simplexes_p))
+                if p is None
+            ]
+            provenance = Provenance(
+                source="dev",
+                message="DEV ONLY — not part of the v1 contract. "
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+            warnings, error = _version_gate(provenance, api_version)
+            if error is not None:
+                return error
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                f"Missing configuration: {', '.join(missing)}.",
+            )
+        provenance = Provenance(
+            source="dev",
+            message="DEV ONLY — not part of the v1 contract.",
+        )
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if not mirror.exists() or not simplexes_p.exists():
+            return _fail(
+                provenance, warnings, 503, "db_missing",
+                "Configured mirror or simplexes file not found.",
+            )
+        try:
+            conn = event_detail_store.connect(mirror)
+            try:
+                simplexes = dev_dda_store.load_simplexes(simplexes_p)
+                sets = None
+                sets_p = config.dda_sets_path()
+                if sets_p is not None and sets_p.exists():
+                    try:
+                        sets = dev_dda_store.load_sets(sets_p)
+                    except (OSError, ValueError):
+                        sets = None
+                if kind == "set" and sets is None:
+                    return _fail(
+                        provenance, warnings, 503, "sets_missing",
+                        "CAMEO set membership is not configured "
+                        "(DDA_SETS_JSON).",
+                    )
+                try:
+                    labels = event_detail_store.cameo_labels(
+                        simplexes_p)
+                except (OSError, ValueError):
+                    labels = None
+                data = event_detail_store.fetch_group_detail(
+                    conn, simplexes, iso1, iso2, as_of,
+                    int(window), kind, key, sets=sets,
+                    labels=labels)
+            finally:
+                conn.close()
+        except ValueError as exc:
+            return _fail(
+                provenance, warnings, 400, "bad_request",
+                str(exc),
+            )
+        except (sqlite3.Error, OSError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read mirror: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     @app.get("/dev/health", response_model=None)
     def dev_health(
         as_of: str | None = Query(default=None),

@@ -694,13 +694,7 @@ def fetch_event_detail(
     `sets` is optional CAMEO set membership for the set-shares
     block; None leaves set_shares None in every window."""
     clean = clean_simplexes(simplexes)
-    if as_of is None:
-        row = conn.execute(
-            "SELECT max(event_date) FROM gdelt_events_core "
-            "WHERE actor1_country_code = ? AND actor2_country_code = ?",
-            (iso1, iso2),
-        ).fetchone()
-        as_of = row[0] if row else None
+    as_of = _resolve_as_of(conn, iso1, iso2, as_of)
     if as_of is None:
         return {
             "iso1": iso1, "iso2": iso2, "as_of": None,
@@ -709,6 +703,72 @@ def fetch_event_detail(
                         for w in WINDOWS},
             "adm1_compare": [],
         }
+    rows, start28, start7, subtype_labels = _load_rows(
+        conn, iso1, iso2, as_of)
+
+    names1 = {r["actor1_name"] for r in rows if r["actor1_name"]}
+    names2 = {r["actor2_name"] for r in rows if r["actor2_name"]}
+    forms1 = _country_form_names(conn, iso1, names1)
+    forms2 = _country_form_names(conn, iso2, names2)
+
+    windows: dict[str, dict] = {}
+    adm1_by_window: dict[int, dict[str, _Acc]] = {}
+    for w in WINDOWS:
+        start = start7 if w == 7 else start28
+        sub = [r for r in rows if r["d"] >= start]
+        payload = _window_payload(sub, clean, forms1, forms2,
+                                  subtype_labels, sets)
+        adm1_by_window[w] = payload.pop("_adm1_acc")
+        windows[str(w)] = payload
+    with_sets = sets is not None
+
+    def _adm1_summary(acc: _Acc | None) -> dict | None:
+        return acc.summary(with_sets) if acc is not None else None
+
+    adm1_compare = [
+        {"adm1": adm1, "n28": acc28.n,
+         "n7": (adm1_by_window[7][adm1].n
+                if adm1 in adm1_by_window[7] else 0),
+         "a28": acc28.articles,
+         "a7": (adm1_by_window[7][adm1].articles
+                if adm1 in adm1_by_window[7] else 0),
+         "w28": _adm1_summary(acc28),
+         "w7": _adm1_summary(adm1_by_window[7].get(adm1))}
+        for adm1, acc28 in sorted(
+            adm1_by_window[28].items(),
+            key=lambda kv: (-kv[1].n, kv[0])
+        )[:8]
+    ]
+    _adm1_labels(conn, rows, adm1_compare)
+    return {
+        "iso1": iso1, "iso2": iso2, "as_of": as_of,
+        "windows": windows, "adm1_compare": adm1_compare,
+    }
+
+
+def _resolve_as_of(
+    conn: sqlite3.Connection, iso1: str, iso2: str,
+    as_of: str | None,
+) -> str | None:
+    if as_of is not None:
+        return as_of
+    row = conn.execute(
+        "SELECT max(event_date) FROM gdelt_events_core "
+        "WHERE actor1_country_code = ? AND actor2_country_code = ?",
+        (iso1, iso2),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _load_rows(
+    conn: sqlite3.Connection, iso1: str, iso2: str, as_of: str,
+) -> tuple[list[dict], str, str, dict[str, str]]:
+    """Fetch and resolve one dyad's 28-day slice ending at
+    as_of (a concrete date): the geo restriction applied,
+    actor names/subtypes and outlet domains attached.
+    Returns (rows, start28, start7, subtype_labels). Shared
+    by fetch_event_detail and fetch_group_detail so the
+    drill-down always sees exactly the figures' rows."""
     end = date.fromisoformat(as_of)
     start28 = (end - timedelta(days=27)).isoformat()
     start7 = (end - timedelta(days=6)).isoformat()
@@ -782,46 +842,146 @@ def fetch_event_detail(
             domain = domain[4:]
         r["domain"] = domain
 
-    names1 = {r["actor1_name"] for r in rows if r["actor1_name"]}
-    names2 = {r["actor2_name"] for r in rows if r["actor2_name"]}
-    forms1 = _country_form_names(conn, iso1, names1)
-    forms2 = _country_form_names(conn, iso2, names2)
     subtype_labels = {
         r[0]: r[1]
         for r in conn.execute(
             "SELECT code, label FROM gdelt_codes_actor_subtype")
     }
+    return rows, start28, start7, subtype_labels
 
-    windows: dict[str, dict] = {}
-    adm1_by_window: dict[int, dict[str, _Acc]] = {}
-    for w in WINDOWS:
-        start = start7 if w == 7 else start28
-        sub = [r for r in rows if r["d"] >= start]
-        payload = _window_payload(sub, clean, forms1, forms2,
-                                  subtype_labels, sets)
-        adm1_by_window[w] = payload.pop("_adm1_acc")
-        windows[str(w)] = payload
-    with_sets = sets is not None
 
-    def _adm1_summary(acc: _Acc | None) -> dict | None:
-        return acc.summary(with_sets) if acc is not None else None
+def cameo_labels(path) -> dict[str, str]:
+    """CAMEO code -> label from the crosswalk file (the
+    tokens JSON carries a label per code)."""
+    import json
 
-    adm1_compare = [
-        {"adm1": adm1, "n28": acc28.n,
-         "n7": (adm1_by_window[7][adm1].n
-                if adm1 in adm1_by_window[7] else 0),
-         "a28": acc28.articles,
-         "a7": (adm1_by_window[7][adm1].articles
-                if adm1 in adm1_by_window[7] else 0),
-         "w28": _adm1_summary(acc28),
-         "w7": _adm1_summary(adm1_by_window[7].get(adm1))}
-        for adm1, acc28 in sorted(
-            adm1_by_window[28].items(),
-            key=lambda kv: (-kv[1].n, kv[0])
-        )[:8]
-    ]
-    _adm1_labels(conn, rows, adm1_compare)
-    return {
-        "iso1": iso1, "iso2": iso2, "as_of": as_of,
-        "windows": windows, "adm1_compare": adm1_compare,
-    }
+    entries = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {e["code"]: e["label"] for e in entries
+            if e.get("code") and e.get("label")}
+
+
+#: Group kinds the Event detail drill-down serves; each
+#: mirrors one figure's grouping on the page.
+GROUP_KINDS = ("geo", "region", "actor_source", "actor_target",
+               "pair", "outlet", "subtype", "set", "state",
+               "tone_bin")
+
+
+def fetch_group_detail(
+    conn: sqlite3.Connection,
+    simplexes: dict[str, tuple[float, ...] | None],
+    iso1: str,
+    iso2: str,
+    as_of: str | None,
+    window: int,
+    kind: str,
+    key: str,
+    sets: dict[str, set[str]] | None = None,
+    labels: dict[str, str] | None = None,
+) -> dict:
+    """CAMEO-level summary for one group on the Event detail
+    page (Dan, 2026-11-16): the group's events in the
+    window, counted per CAMEO code with first/last observed
+    dates, plus the group's own count and date span. Counts
+    and dates only — no derived statistics. The predicates
+    mirror _window_payload's accumulators exactly, so the
+    drill always agrees with the figure it came from."""
+    if window not in WINDOWS:
+        raise ValueError(f"window must be one of {WINDOWS}")
+    if kind not in GROUP_KINDS:
+        raise ValueError(f"unknown group kind {kind!r}")
+    clean = clean_simplexes(simplexes)
+    as_of = _resolve_as_of(conn, iso1, iso2, as_of)
+    base = {"iso1": iso1, "iso2": iso2, "as_of": as_of,
+            "window": window, "kind": kind, "key": key,
+            "label": key, "n_events": 0, "first_date": None,
+            "last_date": None, "cameo": []}
+    if as_of is None:
+        return base
+    rows, start28, start7, subtype_labels = _load_rows(
+        conn, iso1, iso2, as_of)
+    start = start7 if window == 7 else start28
+    sub = [r for r in rows if r["d"] >= start]
+
+    if kind == "geo":
+        try:
+            gid = int(key)
+        except ValueError:
+            raise ValueError(f"bad geo key {key!r}") from None
+        sel = [r for r in sub
+               if r["geo_id"] == gid
+               and r["geo_type"] in MAP_GEO_TYPES]
+        if sel:
+            base["label"] = sel[0]["geo_name"]
+    elif kind == "region":
+        sel = [r for r in sub
+               if r["adm1"] == key and r["geo_type"]]
+    elif kind == "actor_source":
+        sel = [r for r in sub if r["actor1_name"] == key]
+    elif kind == "actor_target":
+        sel = [r for r in sub if r["actor2_name"] == key]
+    elif kind == "pair":
+        parts = key.split("||")
+        if len(parts) != 2:
+            raise ValueError(f"bad pair key {key!r}")
+        sel = [r for r in sub
+               if r["actor1_name"] == parts[0]
+               and r["actor2_name"] == parts[1]]
+        base["label"] = f"{parts[0]} → {parts[1]}"
+    elif kind == "outlet":
+        sel = [r for r in sub if r["domain"] == key]
+    elif kind == "subtype":
+        sel = [r for r in sub
+               if r["actor1_name"] and r["actor1_subtype"] == key]
+        base["label"] = subtype_labels.get(key, key)
+    elif kind == "set":
+        if sets is None:
+            raise ValueError("set membership not configured")
+        codes = sets.get(key)
+        if codes is None:
+            raise ValueError(f"unknown set {key!r}")
+        sel = [r for r in sub if r["cameo_code"] in codes]
+    elif kind == "state":
+        if key not in ("p1", "p2", "p3", "p4", "p5"):
+            raise ValueError(f"bad state key {key!r}")
+        k = int(key[1]) - 1
+        sel = [r for r in sub
+               if (s := clean.get(r["cameo_code"])) is not None
+               and s[k] > STATE_THRESHOLD]
+    else:  # tone_bin
+        try:
+            target = int(key)
+        except ValueError:
+            raise ValueError(f"bad tone_bin key {key!r}") from None
+        if not 0 <= target <= 4:
+            raise ValueError(f"bad tone_bin key {key!r}")
+
+        def _bucket(tone: float) -> int:
+            b = 0
+            while b < 4 and tone >= TONE_EDGES[b]:
+                b += 1
+            return b
+
+        sel = [r for r in sub
+               if r["tone"] is not None
+               and _bucket(r["tone"]) == target]
+
+    per: dict[str, dict] = {}
+    for r in sel:
+        slot = per.setdefault(r["cameo_code"], {
+            "code": r["cameo_code"],
+            "label": (labels or {}).get(r["cameo_code"]),
+            "n": 0, "first": r["d"], "last": r["d"],
+        })
+        slot["n"] += 1
+        slot["first"] = min(slot["first"], r["d"])
+        slot["last"] = max(slot["last"], r["d"])
+    if sel:
+        base.update(
+            n_events=len(sel),
+            first_date=min(r["d"] for r in sel),
+            last_date=max(r["d"] for r in sel),
+            cameo=sorted(per.values(),
+                         key=lambda c: (-c["n"], c["code"])),
+        )
+    return base

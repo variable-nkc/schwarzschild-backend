@@ -425,3 +425,100 @@ def test_event_detail_503_when_unconfigured(tmp_path, monkeypatch):
     resp = client.get("/dev/event-detail",
                       params={"iso1": "AAA", "iso2": "BBB"})
     assert resp.status_code == 503
+
+
+def _get_group(client, **params):
+    resp = client.get("/dev/event-detail/group", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["data"]
+
+
+def test_group_detail_geo_and_state(event_env):
+    # City One (geo 1): events #1 (190, Sep 30) and #2 (030,
+    # Sep 29). Codes sort by count desc, then code.
+    g = _get_group(event_env, iso1="AAA", iso2="BBB",
+                   as_of="2026-09-30", window="28", kind="geo",
+                   key="1")
+    assert g["label"] == "City One"
+    assert g["n_events"] == 2
+    assert g["first_date"] == "2026-09-29"
+    assert g["last_date"] == "2026-09-30"
+    assert g["cameo"] == [
+        {"code": "030", "label": None, "n": 1,
+         "first": "2026-09-29", "last": "2026-09-29"},
+        {"code": "190", "label": None, "n": 1,
+         "first": "2026-09-30", "last": "2026-09-30"},
+    ]
+    # Lund state p5 holds the two 190 events (#1, #4).
+    g = _get_group(event_env, iso1="AAA", iso2="BBB",
+                   as_of="2026-09-30", window="28", kind="state",
+                   key="p5")
+    assert g["n_events"] == 2
+    assert g["cameo"] == [
+        {"code": "190", "label": None, "n": 2,
+         "first": "2026-09-10", "last": "2026-09-30"},
+    ]
+    # p3: 030's cleaned p3 is 0.198 — strictly-greater keeps
+    # it out, so the state is empty in this fixture.
+    g = _get_group(event_env, iso1="AAA", iso2="BBB",
+                   as_of="2026-09-30", window="28", kind="state",
+                   key="p3")
+    assert g["n_events"] == 0 and g["cameo"] == []
+    # 7-day window: only event #1 is a p5 event.
+    g = _get_group(event_env, iso1="AAA", iso2="BBB",
+                   as_of="2026-09-30", window="7", kind="state",
+                   key="p5")
+    assert g["n_events"] == 1
+    assert g["first_date"] == "2026-09-30"
+
+
+def test_group_detail_kinds(event_env):
+    base = dict(iso1="AAA", iso2="BBB", as_of="2026-09-30",
+                window="28")
+    g = _get_group(event_env, kind="set", key="escalatory",
+                   **base)
+    assert g["n_events"] == 2
+    assert [c["code"] for c in g["cameo"]] == ["190"]
+    g = _get_group(event_env, kind="outlet",
+                   key="news.example.com", **base)
+    assert g["n_events"] == 2
+    assert g["first_date"] == "2026-09-10"
+    g = _get_group(event_env, kind="subtype", key="MIL", **base)
+    assert g["label"] == "Military"
+    assert g["n_events"] == 3
+    assert g["cameo"][0] == {"code": "030", "label": None,
+                             "n": 2, "first": "2026-09-12",
+                             "last": "2026-09-15"}
+    g = _get_group(event_env, kind="actor_target",
+                   key="TARGET CITY", **base)
+    assert g["n_events"] == 5
+    g = _get_group(event_env, kind="pair",
+                   key="CAPITAL CITY||TARGET CITY", **base)
+    assert g["n_events"] == 1
+    assert g["label"] == "CAPITAL CITY → TARGET CITY"
+    g = _get_group(event_env, kind="region", key="AA2", **base)
+    assert g["n_events"] == 3
+    # Tone bin 4 (>= -2): the +1, 0, +2 events, all 030.
+    g = _get_group(event_env, kind="tone_bin", key="4", **base)
+    assert g["n_events"] == 3
+    assert g["cameo"] == [
+        {"code": "030", "label": None, "n": 3,
+         "first": "2026-09-12", "last": "2026-09-29"},
+    ]
+    # Tone bin 0 (< -8) is empty; the -8 event sits in bin 1.
+    g = _get_group(event_env, kind="tone_bin", key="1", **base)
+    assert g["n_events"] == 1
+    assert g["cameo"][0]["code"] == "999"
+
+
+def test_group_detail_bad_key_is_400(event_env):
+    resp = event_env.get(
+        "/dev/event-detail/group",
+        params=dict(iso1="AAA", iso2="BBB", as_of="2026-09-30",
+                    window="28", kind="state", key="p9"))
+    assert resp.status_code == 400, resp.text
+    resp = event_env.get(
+        "/dev/event-detail/group",
+        params=dict(iso1="AAA", iso2="BBB", as_of="2026-09-30",
+                    window="28", kind="bogus", key="x"))
+    assert resp.status_code == 422, resp.text
