@@ -211,16 +211,33 @@ def test_event_detail_aggregates(event_env):
         3.0039, abs=1e-3)
     assert "Far City" not in points
 
-    assert data["adm1_compare"] == [
-        {"adm1": "AA2", "n28": 3, "n7": 0, "label": "City Two (AA2)"},
-        {"adm1": "AA1", "n28": 2, "n7": 2, "label": "City One (AA1)"},
-        {"adm1": "BB", "n28": 1, "n7": 1, "label": "B-Land (BB)"},
+    compare = data["adm1_compare"]
+    assert [(r["adm1"], r["n28"], r["n7"], r["label"])
+            for r in compare] == [
+        ("AA2", 3, 0, "City Two (AA2)"),
+        ("AA1", 2, 2, "City One (AA1)"),
+        ("BB", 1, 1, "B-Land (BB)"),
     ]
-    assert w["actors_source"] == [
-        {"name": "GENERAL SOMEONE", "n": 3},
-        {"name": "CAPITAL CITY", "n": 2},
-    ]
-    assert w["actors_target"] == [{"name": "TARGET CITY", "n": 5}]
+    # Each compare row carries both windows' metric summaries
+    # for the page-level colouring: AA2 is City Two's region
+    # (tilt -1/3), AA1 is City One's (tilt 0); AA2 has no 7d
+    # events, so its w7 summary is None.
+    assert compare[0]["w28"]["tilt_by_events"] == -0.3333
+    assert compare[0]["w7"] is None
+    assert compare[1]["w28"]["tilt_by_events"] == 0.0
+    assert compare[1]["w7"]["hot_share_by_events"] == 0.5
+    src = w["actors_source"]
+    assert [(r["name"], r["n"]) for r in src] == [
+        ("GENERAL SOMEONE", 3), ("CAPITAL CITY", 2)]
+    # Ranked actors carry the uniform metric summary too:
+    # GENERAL SOMEONE is the City Two actor (1 hot, 2 calm).
+    assert src[0]["tilt_by_events"] == -0.3333
+    assert src[0]["hot_share_by_events"] == 0.3333
+    assert src[1]["tilt_by_events"] == 0.0
+    tgt = w["actors_target"]
+    assert [(r["name"], r["n"]) for r in tgt] == [
+        ("TARGET CITY", 5)]
+    assert tgt[0]["tilt_by_events"] is not None
     assert w["target_sectors"] == {
         "coded": 5,
         "rows": [{"sector": "GOV", "n": 4},
@@ -246,16 +263,23 @@ def test_event_detail_aggregates(event_env):
         "median_phase"] == pytest.approx(1.7277, abs=1e-3)
     assert outs["third.io"]["by_articles"][
         "median_phase"] == pytest.approx(1.7277, abs=1e-3)
-    assert w["actor_pairs"] == {
-        "sources": ["GENERAL SOMEONE", "CAPITAL CITY"],
-        "targets": ["TARGET CITY"],
-        "rows": [
-            {"source": "GENERAL SOMEONE", "target": "TARGET CITY",
-             "n": 3},
-            {"source": "CAPITAL CITY", "target": "TARGET CITY",
-             "n": 1},
-        ],
-    }
+    # Outlets carry hot/tilt: news reported only 190s,
+    # other.org only 030s.
+    assert outs["news.example.com"]["hot_share_by_events"] == 1.0
+    assert outs["news.example.com"]["tilt_by_events"] == 1.0
+    assert outs["other.org"]["hot_share_by_events"] == 0.0
+    assert outs["other.org"]["tilt_by_events"] == -1.0
+    pairs = w["actor_pairs"]
+    assert pairs["sources"] == ["GENERAL SOMEONE", "CAPITAL CITY"]
+    assert pairs["targets"] == ["TARGET CITY"]
+    assert [(r["source"], r["target"], r["n"])
+            for r in pairs["rows"]] == [
+        ("GENERAL SOMEONE", "TARGET CITY", 3),
+        ("CAPITAL CITY", "TARGET CITY", 1),
+    ]
+    # Pair cells carry the metric summary: the GENERAL cell
+    # is exactly GENERAL SOMEONE's three events.
+    assert pairs["rows"][0]["tilt_by_events"] == -0.3333
     assert len(w["actor_xy"]) == 2
     assert w["actor_xy"][0]["name"] == "GENERAL SOMEONE"
     assert w["actor_xy"][0]["n_events"] == 3
@@ -281,6 +305,13 @@ def test_event_detail_aggregates(event_env):
     assert subs["MIL"]["n_events"] == 3
     assert subs["MIL"]["by_events"]["median_phase"] == (
         pytest.approx(1.7277, abs=1e-3))
+    # Subtypes carry tone medians + hot/tilt: GOV is City
+    # One's pair (tones -6/+1, one hot one calm), MIL is
+    # City Two's trio.
+    assert subs["GOV"]["tone_by_events"] == -2.5
+    assert subs["GOV"]["tilt_by_events"] == 0.0
+    assert subs["MIL"]["tone_by_events"] == 0.0
+    assert subs["MIL"]["tilt_by_events"] == -0.3333
 
     w7 = data["windows"]["7"]
     assert w7["n_events"] == 3

@@ -95,6 +95,11 @@ unstable-but-not-severe (CHN_TWN) reads differently from
 a calm one (CHN_USA), which the severe share alone
 cannot distinguish. 33 codes sit in both families, so
 the tilt is a difference of marginals, not a partition.
+The composition, tone medians, hot shares and tilts are
+computed by one accumulator, so every grouping on the
+page (regions, actors, pair cells, outlets, subtypes)
+exposes the same summary shape and the page's single
+colour-by setting fills them all.
 
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
@@ -246,28 +251,83 @@ class _Acc:
     accumulated as a running sum. Group sizes are bounded by
     the window slice, so the storage is proportional to the
     slice the endpoint already materializes.
+
+    Every accumulator also carries the set-membership
+    counters (severe / tilt-hot / calm, events + articles)
+    behind hot_share and tilt, so EVERY grouping on the page
+    — map points, regions, actors, pairs, outlets, subtypes
+    — exposes the same metric summary and the page's single
+    colour-by setting can fill any of them (Dan, 2026-11-16).
     """
 
-    __slots__ = ("n", "volume", "tone_pairs", "items")
+    __slots__ = ("n", "volume", "articles", "tone_pairs",
+                 "items", "sev", "thot", "calm")
 
     def __init__(self) -> None:
         self.n = 0
         self.volume = 0
+        self.articles = 0
         self.tone_pairs: list[tuple[float, float]] = []
         self.items: list[tuple[tuple[float, ...], float]] = []
+        self.sev = [0, 0]
+        self.thot = [0, 0]
+        self.calm = [0, 0]
 
     @property
     def n_mapped(self) -> int:
         return len(self.items)
 
-    def add(self, row: dict, simplex: tuple[float, ...] | None) -> None:
+    def add(self, row: dict, simplex: tuple[float, ...] | None,
+            flags: tuple[bool, bool, bool] | None = None) -> None:
         self.n += 1
         self.volume += row["mentions"] or 0
+        art = row["articles"] or 0
+        self.articles += art
+        if flags is not None:
+            if flags[0]:
+                self.sev[0] += 1
+                self.sev[1] += art
+            if flags[1]:
+                self.thot[0] += 1
+                self.thot[1] += art
+            if flags[2]:
+                self.calm[0] += 1
+                self.calm[1] += art
         if row["tone"] is not None:
-            self.tone_pairs.append(
-                (row["tone"], row["articles"] or 0))
+            self.tone_pairs.append((row["tone"], art))
         if simplex is not None:
-            self.items.append((simplex, row["articles"] or 0))
+            self.items.append((simplex, art))
+
+    def metrics(self, with_sets: bool) -> dict:
+        """Tone medians + hot share + tilt under both
+        weightings — the flat metric keys every grouping
+        shares. Hot/tilt are None without set membership."""
+        medians = _tone_medians(self.tone_pairs)
+        out = {
+            "tone_by_events": medians["by_events"],
+            "tone_by_articles": medians["by_articles"],
+            "hot_share_by_events": None,
+            "hot_share_by_articles": None,
+            "tilt_by_events": None,
+            "tilt_by_articles": None,
+        }
+        if with_sets and self.n:
+            out["hot_share_by_events"] = round(
+                self.sev[0] / self.n, 4)
+            out["tilt_by_events"] = round(
+                self.thot[0] / self.n - self.calm[0] / self.n, 4)
+        if with_sets and self.articles:
+            out["hot_share_by_articles"] = round(
+                self.sev[1] / self.articles, 4)
+            out["tilt_by_articles"] = round(
+                self.thot[1] / self.articles
+                - self.calm[1] / self.articles, 4)
+        return out
+
+    def summary(self, with_sets: bool) -> dict:
+        """Composition (by_events / by_articles) + metrics:
+        the uniform per-group payload the page colours by."""
+        return {**self.composition(), **self.metrics(with_sets)}
 
     def _summarize(self, weighted: bool) -> dict | None:
         if not self.items:
@@ -320,16 +380,14 @@ def _window_payload(
     geo_acc: dict[int, _Acc] = {}
     geo_meta: dict[int, dict] = {}
     n_country_geo = 0
-    adm1: dict[str, int] = {}
-    src_names: dict[str, int] = {}
-    tgt_names: dict[str, int] = {}
+    adm1_acc: dict[str, _Acc] = {}
+    tgt_acc: dict[str, _Acc] = {}
     sectors: dict[str, int] = {}
     sectors_coded = 0
     tone_buckets = [0] * 6
     tone_pairs_all: list[tuple[float, float]] = []
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
     outlets: dict[str, _Acc] = {}
-    geo_hot: dict[int, list[int]] = {}
     hot_codes: set[str] = set()
     calm_codes: set[str] = set()
     tilt_hot_codes: set[str] = set()
@@ -340,7 +398,7 @@ def _window_payload(
                       | set(sets.get("deescalatory", ())))
         tilt_hot_codes = (hot_codes
                           | set(sets.get("instability", ())))
-    pairs: dict[tuple[str, str], int] = {}
+    pair_acc: dict[tuple[str, str], _Acc] = {}
     xy_acc: dict[str, _Acc] = {}
     sub_acc: dict[str, _Acc] = {}
     sub_actors: dict[str, set[str]] = {}
@@ -348,8 +406,11 @@ def _window_payload(
     set_counts: dict[str, list[int]] = {}
 
     for row in rows:
+        flags = None
         if sets is not None:
             code = row["cameo_code"]
+            flags = (code in hot_codes, code in tilt_hot_codes,
+                     code in calm_codes)
             for name in SET_ORDER:
                 if code in sets.get(name, ()):
                     slot = set_counts.setdefault(name, [0, 0])
@@ -370,11 +431,12 @@ def _window_payload(
         rep["mentions"] += row["mentions"] or 0
         if row["domain"]:
             acc_o = outlets.setdefault(row["domain"], _Acc())
-            acc_o.add(row, simplex)
+            acc_o.add(row, simplex, flags)
 
         if row["geo_id"] is not None and row["geo_type"]:
             if row["adm1"]:
-                adm1[row["adm1"]] = adm1.get(row["adm1"], 0) + 1
+                adm1_acc.setdefault(row["adm1"], _Acc()).add(
+                    row, simplex, flags)
             if row["geo_type"] == "COUNTRY":
                 n_country_geo += 1
             elif row["geo_type"] in MAP_GEO_TYPES:
@@ -386,42 +448,27 @@ def _window_payload(
                         "type": row["geo_type"], "lat": row["lat"],
                         "lon": row["lon"],
                     }
-                geo_acc[gid].add(row, simplex)
-                if sets is not None:
-                    # [severe_n, severe_a, tilt_hot_n,
-                    #  tilt_hot_a, calm_n, calm_a, all_a]
-                    hot = geo_hot.setdefault(
-                        gid, [0, 0, 0, 0, 0, 0, 0])
-                    hot[6] += row["articles"] or 0
-                    if row["cameo_code"] in hot_codes:
-                        hot[0] += 1
-                        hot[1] += row["articles"] or 0
-                    if row["cameo_code"] in tilt_hot_codes:
-                        hot[2] += 1
-                        hot[3] += row["articles"] or 0
-                    if row["cameo_code"] in calm_codes:
-                        hot[4] += 1
-                        hot[5] += row["articles"] or 0
+                geo_acc[gid].add(row, simplex, flags)
 
         name1 = row["actor1_name"]
         if name1:
             if name1 not in forms1:
-                src_names[name1] = src_names.get(name1, 0) + 1
                 acc = xy_acc.setdefault(name1, _Acc())
-                acc.add(row, simplex)
+                acc.add(row, simplex, flags)
             sub = row["actor1_subtype"]
             if sub:
                 sub_coded += 1
                 acc = sub_acc.setdefault(sub, _Acc())
-                acc.add(row, simplex)
+                acc.add(row, simplex, flags)
                 sub_actors.setdefault(sub, set()).add(name1)
         name2 = row["actor2_name"]
         if name2 and name2 not in forms2:
-            tgt_names[name2] = tgt_names.get(name2, 0) + 1
+            tgt_acc.setdefault(name2, _Acc()).add(
+                row, simplex, flags)
         if (name1 and name1 not in forms1
                 and name2 and name2 not in forms2):
-            key = (name1, name2)
-            pairs[key] = pairs.get(key, 0) + 1
+            pair_acc.setdefault((name1, name2), _Acc()).add(
+                row, simplex, flags)
         parent = row["parent2"]
         if parent:
             sectors_coded += 1
@@ -429,32 +476,15 @@ def _window_payload(
                 if ":" in parent else parent
             sectors[sector] = sectors.get(sector, 0) + 1
 
+    with_sets = sets is not None
     map_points = []
     for gid, acc in geo_acc.items():
-        medians = _tone_medians(acc.tone_pairs)
-        (hot_n, hot_a, thot_n, thot_a,
-         calm_n, calm_a, all_a) = geo_hot.get(
-            gid, [0, 0, 0, 0, 0, 0, 0])
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
             "volume": acc.volume,
-            "tone_by_events": medians["by_events"],
-            "tone_by_articles": medians["by_articles"],
-            "hot_share_by_events": (
-                round(hot_n / acc.n, 4)
-                if sets is not None and acc.n else None),
-            "hot_share_by_articles": (
-                round(hot_a / all_a, 4)
-                if sets is not None and all_a else None),
-            "tilt_by_events": (
-                round(thot_n / acc.n - calm_n / acc.n, 4)
-                if sets is not None and acc.n else None),
-            "tilt_by_articles": (
-                round(thot_a / all_a - calm_a / all_a, 4)
-                if sets is not None and all_a else None),
+            **acc.summary(with_sets),
         }
-        point.update(acc.composition())
         map_points.append(point)
     map_points.sort(key=lambda p: p["volume"], reverse=True)
 
@@ -465,49 +495,47 @@ def _window_payload(
         comp = acc.composition()
         if comp["by_events"] is None:
             continue
-        medians = _tone_medians(acc.tone_pairs)
         xy.append({
             "name": name, "n_events": acc.n, "volume": acc.volume,
-            "tone_by_events": medians["by_events"],
-            "tone_by_articles": medians["by_articles"],
-            **comp,
+            **acc.summary(with_sets),
         })
     xy.sort(key=lambda r: r["n_events"], reverse=True)
 
     subtypes = []
     for code, acc in sub_acc.items():
-        comp = acc.composition()
         subtypes.append({
             "code": code,
             "label": subtype_labels.get(code, code),
             "n_events": acc.n,
             "n_actors": len(sub_actors.get(code, ())),
-            "by_events": comp["by_events"],
-            "by_articles": comp["by_articles"],
+            **acc.summary(with_sets),
         })
     subtypes.sort(key=lambda r: r["n_events"], reverse=True)
 
     pair_src: dict[str, int] = {}
     pair_tgt: dict[str, int] = {}
-    for (s, t), count in pairs.items():
-        pair_src[s] = pair_src.get(s, 0) + count
-        pair_tgt[t] = pair_tgt.get(t, 0) + count
+    for (s, t), acc in pair_acc.items():
+        pair_src[s] = pair_src.get(s, 0) + acc.n
+        pair_tgt[t] = pair_tgt.get(t, 0) + acc.n
     top_src = [name for name, _ in sorted(
         pair_src.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
     top_tgt = [name for name, _ in sorted(
         pair_tgt.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
     pair_rows = [
-        {"source": s, "target": t, "n": count}
-        for (s, t), count in sorted(
-            pairs.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        {"source": s, "target": t, "n": acc.n,
+         **acc.summary(with_sets)}
+        for (s, t), acc in sorted(
+            pair_acc.items(),
+            key=lambda kv: (-kv[1].n, kv[0][0], kv[0][1]))
         if s in top_src and t in top_tgt
     ]
 
-    def _ranked(names: dict[str, int], cap: int = 8) -> list[dict]:
+    def _ranked(accs: dict[str, _Acc],
+                cap: int = 8) -> list[dict]:
         return [
-            {"name": name, "n": count}
-            for name, count in sorted(
-                names.items(), key=lambda kv: (-kv[1], kv[0]))[:cap]
+            {"name": name, "n": acc.n, **acc.summary(with_sets)}
+            for name, acc in sorted(
+                accs.items(), key=lambda kv: (-kv[1].n, kv[0]))[:cap]
         ]
 
     set_shares = None
@@ -532,8 +560,8 @@ def _window_payload(
         "mapped_share": round(n_mapped / n, 4) if n else None,
         "map_points": map_points[:200],
         "n_country_geo": n_country_geo,
-        "actors_source": _ranked(src_names),
-        "actors_target": _ranked(tgt_names),
+        "actors_source": _ranked(xy_acc),
+        "actors_target": _ranked(tgt_acc),
         "target_sectors": {
             "coded": sectors_coded,
             "rows": [
@@ -554,10 +582,7 @@ def _window_payload(
         },
         "outlets": [
             {"name": name, "n": acc_o.n,
-             **{f"tone_{key}": value
-                for key, value
-                in _tone_medians(acc_o.tone_pairs).items()},
-             **acc_o.composition()}
+             **acc_o.summary(with_sets)}
             for name, acc_o in sorted(
                 outlets.items(), key=lambda kv: (-kv[1].n, kv[0]))[:8]
         ],
@@ -569,7 +594,7 @@ def _window_payload(
             "coded_share": round(sub_coded / n, 4) if n else None,
             "rows": subtypes,
         },
-        "_adm1": adm1,
+        "_adm1_acc": adm1_acc,
     }
 
 
@@ -734,19 +759,28 @@ def fetch_event_detail(
     }
 
     windows: dict[str, dict] = {}
-    adm1_by_window: dict[int, dict[str, int]] = {}
+    adm1_by_window: dict[int, dict[str, _Acc]] = {}
     for w in WINDOWS:
         start = start7 if w == 7 else start28
         sub = [r for r in rows if r["d"] >= start]
         payload = _window_payload(sub, clean, forms1, forms2,
                                   subtype_labels, sets)
-        adm1_by_window[w] = payload.pop("_adm1")
+        adm1_by_window[w] = payload.pop("_adm1_acc")
         windows[str(w)] = payload
+    with_sets = sets is not None
+
+    def _adm1_summary(acc: _Acc | None) -> dict | None:
+        return acc.summary(with_sets) if acc is not None else None
+
     adm1_compare = [
-        {"adm1": adm1, "n28": count,
-         "n7": adm1_by_window[7].get(adm1, 0)}
-        for adm1, count in sorted(
-            adm1_by_window[28].items(), key=lambda kv: (-kv[1], kv[0])
+        {"adm1": adm1, "n28": acc28.n,
+         "n7": (adm1_by_window[7][adm1].n
+                if adm1 in adm1_by_window[7] else 0),
+         "w28": _adm1_summary(acc28),
+         "w7": _adm1_summary(adm1_by_window[7].get(adm1))}
+        for adm1, acc28 in sorted(
+            adm1_by_window[28].items(),
+            key=lambda kv: (-kv[1].n, kv[0])
         )[:8]
     ]
     _adm1_labels(conn, rows, adm1_compare)
