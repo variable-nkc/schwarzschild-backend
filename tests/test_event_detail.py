@@ -189,9 +189,12 @@ def test_country_form_names(event_env):
 
     conn = _sq.connect(os.environ["MIRROR_SQLITE"])
     try:
-        assert _country_form_names(conn, "AAA") == {
-            "AAALAND", "AAALANDIAN"}
-        assert _country_form_names(conn, "BBB") == {"BBBLAND"}
+        assert _country_form_names(
+            conn, "AAA",
+            {"AAALAND", "AAALANDIAN", "CAPITAL CITY",
+             "GENERAL SOMEONE"}) == {"AAALAND", "AAALANDIAN"}
+        assert _country_form_names(
+            conn, "BBB", {"BBBLAND", "TARGET CITY"}) == {"BBBLAND"}
     finally:
         conn.close()
 

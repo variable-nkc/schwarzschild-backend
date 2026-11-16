@@ -91,14 +91,19 @@ _DEMONYM_EXCEPTIONS: dict[str, set[str]] = {
 }
 
 
-def _country_form_names(conn: sqlite3.Connection, iso: str) -> set[str]:
+def _country_form_names(
+    conn: sqlite3.Connection, iso: str, candidates: set[str],
+) -> set[str]:
     """Bare-country actor names for one ISO code, derived from
     the country's name in gdelt_codes_country: the name itself,
     formal variants starting with it, short prefixes of it, and
     single-word stem variants (demonyms and their misspellings,
     e.g. UKRAINIAN / UKRAINA for UKRAINE), plus the irregular-
-    demonym table. Candidates are the country's own actor
-    names, so a stem collision can only bite within the country.
+    demonym table. Candidates are the actor names present in
+    the window slice (the only names the forms are ever checked
+    against), so no scan of gdelt_actors is needed — the mirror
+    carries no index on that table, and a DISTINCT scan costs
+    ~1s per country.
     """
     row = conn.execute(
         "SELECT full_name FROM gdelt_codes_country WHERE code = ?",
@@ -106,12 +111,11 @@ def _country_form_names(conn: sqlite3.Connection, iso: str) -> set[str]:
     ).fetchone()
     base = (row[0] if row and row[0] else iso).upper()
     stem = base.rstrip("AEIOU") if len(base) > 4 else base
-    forms = set(_DEMONYM_EXCEPTIONS.get(iso, set()))
-    for (name,) in conn.execute(
-        "SELECT DISTINCT full_name FROM gdelt_actors "
-        "WHERE country_code = ?",
-        (iso,),
-    ):
+    forms = {
+        name for name in _DEMONYM_EXCEPTIONS.get(iso, set())
+        if name in candidates
+    }
+    for name in candidates:
         if not name:
             continue
         if (
@@ -381,17 +385,34 @@ def fetch_event_detail(
     ).fetchall()
     rows = [dict(r) for r in raw]
 
-    actor_ids = {r["a1"] for r in rows} | {r["a2"] for r in rows}
+    # The mirror carries no index on gdelt_actors, so resolving
+    # names is the expensive step if done naively: an IN(...)
+    # lookup per chunk costs a full 2.9M-row scan per chunk
+    # (measured 4.3s for a heavy dyad), and iterating the table
+    # in Python is no better (~4s of row overhead). A temp-table
+    # join keeps the single unavoidable scan in C and probes
+    # the temp PK per row: ~0.9s for the same dyad. (An index
+    # on gdelt_actors(id) would make this moot; index builds
+    # are the operator's call, not this endpoint's.)
+    wanted = {r["a1"] for r in rows} | {r["a2"] for r in rows}
+    wanted.discard(None)
     actors: dict[int, dict] = {}
-    ids = [i for i in actor_ids if i is not None]
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        for r in conn.execute(
-            "SELECT id, full_name, subtype1_code FROM gdelt_actors "
-            f"WHERE id IN ({','.join('?' * len(chunk))})",
-            chunk,
-        ):
-            actors[r[0]] = {"name": r[1], "subtype": r[2]}
+    if wanted:
+        conn.execute(
+            "CREATE TEMP TABLE _want_actors (id INTEGER PRIMARY KEY)")
+        try:
+            conn.executemany(
+                "INSERT INTO _want_actors VALUES (?)",
+                [(aid,) for aid in wanted],
+            )
+            for aid, name, sub in conn.execute(
+                "SELECT a.id, a.full_name, a.subtype1_code "
+                "FROM gdelt_actors a "
+                "JOIN _want_actors w ON w.id = a.id"
+            ):
+                actors[aid] = {"name": name, "subtype": sub}
+        finally:
+            conn.execute("DROP TABLE IF EXISTS _want_actors")
     for r in rows:
         a1 = actors.get(r["a1"]) or {}
         a2 = actors.get(r["a2"]) or {}
@@ -407,8 +428,10 @@ def fetch_event_detail(
             domain = domain[4:]
         r["domain"] = domain
 
-    forms1 = _country_form_names(conn, iso1)
-    forms2 = _country_form_names(conn, iso2)
+    names1 = {r["actor1_name"] for r in rows if r["actor1_name"]}
+    names2 = {r["actor2_name"] for r in rows if r["actor2_name"]}
+    forms1 = _country_form_names(conn, iso1, names1)
+    forms2 = _country_form_names(conn, iso2, names2)
     subtype_labels = {
         r[0]: r[1]
         for r in conn.execute(
