@@ -29,10 +29,14 @@ and toward no composition; each window reports its mapped share.
 Only events whose geo lies in the source or target country are
 included (Dan, 2026-11-16: third-country locations confuse the
 page's readers); events with no resolved geo are excluded too.
-Two Lund summaries ride on every composition: the dominant
-phase of the aggregated mean simplex, and the modal phase —
-the most common per-event dominant phase (each event voting
-with the argmax of its own code's simplex).
+Every composition is computed under two weightings (Dan,
+2026-11-16): by unique events — each matching record in the
+mirror counts once — and by articles — each record weighted
+by its min_num_articles. Both report the mean simplex, its
+dominant phase, and the mean phase. (A per-event modal-phase
+variant shipped briefly and was removed at Dan's direction;
+there is no fully unweighted variant — the by-events scheme
+is the record-count weighting.)
 
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
@@ -150,18 +154,20 @@ def _dominant(simplex: list[float]) -> int:
 
 
 class _Acc:
-    """Running composition + volume over a group of events."""
+    """Running composition + volume over a group of events,
+    under both weightings (per unique event; per article)."""
 
-    __slots__ = ("n", "volume", "n_mapped", "simp", "tone_sum",
-                 "phase_votes")
+    __slots__ = ("n", "volume", "n_mapped", "tone_sum",
+                 "simp_events", "simp_articles", "w_articles")
 
     def __init__(self) -> None:
         self.n = 0
         self.volume = 0
         self.n_mapped = 0
-        self.simp = [0.0] * 5
         self.tone_sum = 0.0
-        self.phase_votes = [0] * 5
+        self.simp_events = [0.0] * 5
+        self.simp_articles = [0.0] * 5
+        self.w_articles = 0.0
 
     def add(self, row: dict, simplex: tuple[float, ...] | None) -> None:
         self.n += 1
@@ -170,20 +176,29 @@ class _Acc:
             self.tone_sum += row["tone"]
         if simplex is not None:
             self.n_mapped += 1
+            articles = row["articles"] or 0
+            self.w_articles += articles
             for k in range(5):
-                self.simp[k] += simplex[k]
-            self.phase_votes[_dominant(list(simplex)) - 1] += 1
+                self.simp_events[k] += simplex[k]
+                self.simp_articles[k] += simplex[k] * articles
 
-    def composition(self) -> dict | None:
-        if not self.n_mapped:
+    @staticmethod
+    def _summarize(sums: list[float], weight: float) -> dict | None:
+        if not weight:
             return None
-        mean = [v / self.n_mapped for v in self.simp]
+        mean = [v / weight for v in sums]
         return {
             "simplex": [round(v, 6) for v in mean],
             "dominant_phase": _dominant(mean),
             "mean_phase": round(_mean_phase(mean), 4),
-            "modal_phase": max(
-                range(5), key=lambda k: self.phase_votes[k]) + 1,
+        }
+
+    def composition(self) -> dict:
+        return {
+            "by_events": self._summarize(
+                self.simp_events, float(self.n_mapped)),
+            "by_articles": self._summarize(
+                self.simp_articles, self.w_articles),
         }
 
 
@@ -277,15 +292,13 @@ def _window_payload(
 
     map_points = []
     for gid, acc in geo_acc.items():
-        comp = acc.composition()
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
             "volume": acc.volume,
             "mean_tone": round(acc.tone_sum / acc.n, 4) if acc.n else None,
         }
-        if comp is not None:
-            point.update(comp)
+        point.update(acc.composition())
         map_points.append(point)
     map_points.sort(key=lambda p: p["volume"], reverse=True)
 
@@ -294,7 +307,7 @@ def _window_payload(
         if acc.n < 2:
             continue
         comp = acc.composition()
-        if comp is None:
+        if comp["by_events"] is None:
             continue
         xy.append({
             "name": name, "n_events": acc.n, "volume": acc.volume,
@@ -310,9 +323,8 @@ def _window_payload(
             "label": subtype_labels.get(code, code),
             "n_events": acc.n,
             "n_actors": len(sub_actors.get(code, ())),
-            "mean_phase": comp["mean_phase"] if comp else None,
-            "dominant_phase": comp["dominant_phase"] if comp else None,
-            "modal_phase": comp["modal_phase"] if comp else None,
+            "by_events": comp["by_events"],
+            "by_articles": comp["by_articles"],
         })
     subtypes.sort(key=lambda r: r["n_events"], reverse=True)
 

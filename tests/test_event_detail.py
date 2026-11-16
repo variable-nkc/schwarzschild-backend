@@ -141,15 +141,22 @@ def test_event_detail_aggregates(event_env):
     one = points["City One"]
     assert one["n_events"] == 2 and one["volume"] == 8
     assert one["mean_tone"] == -2.5
-    assert one["dominant_phase"] == 5
-    assert one["mean_phase"] == pytest.approx(3.3394, abs=1e-3)
-    # Event-mode Lund: ev1 votes p5, ev2 votes p1 — the tie
-    # resolves to the lower phase, unlike the mean's dominant.
-    assert one["modal_phase"] == 1
+    assert one["by_events"]["dominant_phase"] == 5
+    assert one["by_events"]["mean_phase"] == pytest.approx(
+        3.3394, abs=1e-3)
+    # Articles weighting (ev1 has 4 articles, ev2 has 1) pulls
+    # the composition toward ev1's near-pure p5 simplex.
+    assert one["by_articles"]["dominant_phase"] == 5
+    assert one["by_articles"]["mean_phase"] == pytest.approx(
+        4.3063, abs=1e-3)
+    assert one["by_articles"]["simplex"][4] == pytest.approx(
+        0.7853, abs=1e-3)
     two = points["City Two"]
     assert two["n_events"] == 1 and two["volume"] == 3
-    assert two["mean_phase"] == pytest.approx(4.9510, abs=1e-3)
-    assert two["modal_phase"] == 5
+    assert two["by_events"]["mean_phase"] == pytest.approx(
+        4.9510, abs=1e-3)
+    assert two["by_articles"]["mean_phase"] == pytest.approx(
+        4.9510, abs=1e-3)
     assert "Far City" not in points
 
     assert data["adm1_compare"] == [
@@ -194,9 +201,12 @@ def test_event_detail_aggregates(event_env):
     assert subs["GOV"]["n_events"] == 2
     assert subs["GOV"]["n_actors"] == 1
     assert subs["GOV"]["label"] == "Government"
-    assert subs["GOV"]["modal_phase"] == 1
+    assert subs["GOV"]["by_events"]["mean_phase"] == (
+        pytest.approx(3.3394, abs=1e-3))
+    assert subs["GOV"]["by_articles"]["mean_phase"] == (
+        pytest.approx(4.3063, abs=1e-3))
     assert subs["MIL"]["n_events"] == 1
-    assert subs["MIL"]["modal_phase"] == 5
+    assert subs["MIL"]["by_events"]["dominant_phase"] == 5
 
     w7 = data["windows"]["7"]
     assert w7["n_events"] == 3
