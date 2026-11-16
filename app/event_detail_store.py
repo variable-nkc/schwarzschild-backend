@@ -127,7 +127,16 @@ from pathlib import Path
 from .dev_dda_store import JOINT_DELTA
 
 MAP_GEO_TYPES = ("WORLD_CITY", "US_CITY", "WORLD_STATE", "US_STATE")
-TONE_EDGES = (-7.5, -5.0, -2.5, 0.0, 2.5)
+#: Tone histogram bins (Dan, 2026-11-16): five bins over
+#: the locked -10..0 scale — tone <= -8 ("8+"), then
+#: -8..-6, -6..-4, -4..-2, and everything above -2 ("< 2",
+#: positives included). Bucket index 0 is the severe end.
+TONE_EDGES = (-8.0, -6.0, -4.0, -2.0)
+#: A Lund state "holds" an event when the event's simplex
+#: puts strictly more than this on the phase (Dan,
+#: 2026-11-16). Strictness keeps near-uniform catch-all
+#: simplexes (0.2 per component) out of every state.
+STATE_THRESHOLD = 0.20
 WINDOWS = (7, 28)
 #: The five CAMEO action sets, in the app's display order
 #: (mirrors dev_dda_store.ACTION_SETS).
@@ -384,8 +393,10 @@ def _window_payload(
     tgt_acc: dict[str, _Acc] = {}
     sectors: dict[str, int] = {}
     sectors_coded = 0
-    tone_buckets = [0] * 6
+    tone_buckets = [0] * 5
+    tone_bucket_articles = [0] * 5
     tone_pairs_all: list[tuple[float, float]] = []
+    state_counts = [[0, 0] for _ in range(5)]
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
     outlets: dict[str, _Acc] = {}
     hot_codes: set[str] = set()
@@ -419,13 +430,18 @@ def _window_payload(
         simplex = clean.get(row["cameo_code"])
         if simplex is not None:
             n_mapped += 1
+            for k in range(5):
+                if simplex[k] > STATE_THRESHOLD:
+                    state_counts[k][0] += 1
+                    state_counts[k][1] += row["articles"] or 0
         if row["tone"] is not None:
             tone_pairs_all.append(
                 (row["tone"], row["articles"] or 0))
             bucket = 0
-            while bucket < 5 and row["tone"] >= TONE_EDGES[bucket]:
+            while bucket < 4 and row["tone"] >= TONE_EDGES[bucket]:
                 bucket += 1
             tone_buckets[bucket] += 1
+            tone_bucket_articles[bucket] += row["articles"] or 0
         rep["sources"] += row["sources"] or 0
         rep["articles"] += row["articles"] or 0
         rep["mentions"] += row["mentions"] or 0
@@ -482,6 +498,7 @@ def _window_payload(
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
+            "articles": acc.articles,
             "volume": acc.volume,
             **acc.summary(with_sets),
         }
@@ -496,7 +513,8 @@ def _window_payload(
         if comp["by_events"] is None:
             continue
         xy.append({
-            "name": name, "n_events": acc.n, "volume": acc.volume,
+            "name": name, "n_events": acc.n,
+            "articles": acc.articles, "volume": acc.volume,
             **acc.summary(with_sets),
         })
     xy.sort(key=lambda r: r["n_events"], reverse=True)
@@ -507,6 +525,7 @@ def _window_payload(
             "code": code,
             "label": subtype_labels.get(code, code),
             "n_events": acc.n,
+            "articles": acc.articles,
             "n_actors": len(sub_actors.get(code, ())),
             **acc.summary(with_sets),
         })
@@ -523,7 +542,7 @@ def _window_payload(
         pair_tgt.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
     pair_rows = [
         {"source": s, "target": t, "n": acc.n,
-         **acc.summary(with_sets)}
+         "articles": acc.articles, **acc.summary(with_sets)}
         for (s, t), acc in sorted(
             pair_acc.items(),
             key=lambda kv: (-kv[1].n, kv[0][0], kv[0][1]))
@@ -533,14 +552,26 @@ def _window_payload(
     def _ranked(accs: dict[str, _Acc],
                 cap: int = 8) -> list[dict]:
         return [
-            {"name": name, "n": acc.n, **acc.summary(with_sets)}
+            {"name": name, "n": acc.n, "articles": acc.articles,
+             **acc.summary(with_sets)}
             for name, acc in sorted(
                 accs.items(), key=lambda kv: (-kv[1].n, kv[0]))[:cap]
         ]
 
+    total_articles = rep["articles"]
+    state_shares = [
+        {"state": f"p{k + 1}",
+         "n_events": state_counts[k][0],
+         "n_articles": state_counts[k][1],
+         "share_by_events": (
+             round(state_counts[k][0] / n, 4) if n else None),
+         "share_by_articles": (
+             round(state_counts[k][1] / total_articles, 4)
+             if total_articles else None)}
+        for k in range(5)
+    ]
     set_shares = None
     if sets is not None:
-        total_articles = rep["articles"]
         set_shares = []
         for name in SET_ORDER:
             n_set, a_set = set_counts.get(name, [0, 0])
@@ -572,9 +603,11 @@ def _window_payload(
         },
         "tone": {
             "buckets": tone_buckets,
+            "bucket_articles": tone_bucket_articles,
             **{f"median_{key}": value for key, value
                in _tone_medians(tone_pairs_all).items()},
         },
+        "state_shares": state_shares,
         "set_shares": set_shares,
         "reporting": {
             key: (round(val / n, 4) if n else None)
@@ -582,6 +615,7 @@ def _window_payload(
         },
         "outlets": [
             {"name": name, "n": acc_o.n,
+             "articles": acc_o.articles,
              **acc_o.summary(with_sets)}
             for name, acc_o in sorted(
                 outlets.items(), key=lambda kv: (-kv[1].n, kv[0]))[:8]
@@ -775,6 +809,9 @@ def fetch_event_detail(
     adm1_compare = [
         {"adm1": adm1, "n28": acc28.n,
          "n7": (adm1_by_window[7][adm1].n
+                if adm1 in adm1_by_window[7] else 0),
+         "a28": acc28.articles,
+         "a7": (adm1_by_window[7][adm1].articles
                 if adm1 in adm1_by_window[7] else 0),
          "w28": _adm1_summary(acc28),
          "w7": _adm1_summary(adm1_by_window[7].get(adm1))}

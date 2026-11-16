@@ -226,6 +226,9 @@ def test_event_detail_aggregates(event_env):
     assert compare[0]["w7"] is None
     assert compare[1]["w28"]["tilt_by_events"] == 0.0
     assert compare[1]["w7"]["hot_share_by_events"] == 0.5
+    # Article totals ride along for the page-wide weighting:
+    # AA1's two events carry 4 + 1 articles in both windows.
+    assert compare[1]["a28"] == 5 and compare[1]["a7"] == 5
     src = w["actors_source"]
     assert [(r["name"], r["n"]) for r in src] == [
         ("GENERAL SOMEONE", 3), ("CAPITAL CITY", 2)]
@@ -243,7 +246,30 @@ def test_event_detail_aggregates(event_env):
         "rows": [{"sector": "GOV", "n": 4},
                  {"sector": "MIL", "n": 1}],
     }
-    assert w["tone"]["buckets"] == [1, 1, 1, 0, 3, 0]
+    # Dan's five bins over -10..0, severe first: < -8,
+    # [-8, -6), [-6, -4), [-4, -2), >= -2. Fixture tones:
+    # -8 (the unmapped event, 2 articles), -6 (4), -3 (3),
+    # 0 (1), +1 (1), +2 (2).
+    assert w["tone"]["buckets"] == [0, 1, 1, 1, 3]
+    assert w["tone"]["bucket_articles"] == [0, 2, 4, 3, 4]
+    # Lund state shares: an event counts in a state when
+    # its simplex puts > 0.20 on the phase. 030's simplex
+    # (0.495, 0.297, 0.198, ...) holds p1 + p2; 190's holds
+    # p5 only; the 999 event is unmapped. Denominators are
+    # ALL slice events / articles, as with the set shares.
+    assert w["state_shares"] == [
+        {"state": "p1", "n_events": 3, "n_articles": 4,
+         "share_by_events": 0.5, "share_by_articles": 0.3077},
+        {"state": "p2", "n_events": 3, "n_articles": 4,
+         "share_by_events": 0.5, "share_by_articles": 0.3077},
+        {"state": "p3", "n_events": 0, "n_articles": 0,
+         "share_by_events": 0.0, "share_by_articles": 0.0},
+        {"state": "p4", "n_events": 0, "n_articles": 0,
+         "share_by_events": 0.0, "share_by_articles": 0.0},
+        {"state": "p5", "n_events": 2, "n_articles": 7,
+         "share_by_events": 0.3333,
+         "share_by_articles": 0.5385},
+    ]
     assert w["tone"]["median_by_events"] == -1.5
     assert w["tone"]["median_by_articles"] == -3
     assert w["reporting"] == {
