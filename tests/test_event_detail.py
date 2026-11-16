@@ -128,8 +128,20 @@ def event_env(tmp_path, monkeypatch):
         ]),
         encoding="utf-8",
     )
+    groups = tmp_path / "cameo_groups.json"
+    groups.write_text(
+        json.dumps({
+            "escalatory": ["190"],
+            "instability": ["190"],
+            "stability": ["030"],
+            "deescalatory": [],
+            "critical_incidents": ["190"],
+        }),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("MIRROR_SQLITE", str(db))
     monkeypatch.setenv("DDA_SIMPLEXES_JSON", str(tokens))
+    monkeypatch.setenv("DDA_SETS_JSON", str(groups))
     monkeypatch.setenv("API_VERSION_MODE", "strict")
     return TestClient(create_app())
 
@@ -247,6 +259,40 @@ def test_event_detail_aggregates(event_env):
     assert w7["n_mapped"] == 2
     assert w7["tone"]["median_by_events"] == -6
     assert w7["tone"]["median_by_articles"] == -6
+
+    # Set shares: 190 in escalatory/instability/CI, 030 in
+    # stability, 999 in none; denominators are ALL slice
+    # events (6 events, 13 articles over 28d).
+    assert w["set_shares"] == [
+        {"set": "escalatory", "n_events": 2, "n_articles": 7,
+         "share_by_events": 0.3333, "share_by_articles": 0.5385},
+        {"set": "instability", "n_events": 2, "n_articles": 7,
+         "share_by_events": 0.3333, "share_by_articles": 0.5385},
+        {"set": "stability", "n_events": 3, "n_articles": 4,
+         "share_by_events": 0.5, "share_by_articles": 0.3077},
+        {"set": "deescalatory", "n_events": 0, "n_articles": 0,
+         "share_by_events": 0.0, "share_by_articles": 0.0},
+        {"set": "critical_incidents", "n_events": 2,
+         "n_articles": 7, "share_by_events": 0.3333,
+         "share_by_articles": 0.5385},
+    ]
+    assert w7["set_shares"][0] == {
+        "set": "escalatory", "n_events": 1, "n_articles": 4,
+        "share_by_events": 0.3333, "share_by_articles": 0.5714}
+    assert w7["set_shares"][2] == {
+        "set": "stability", "n_events": 1, "n_articles": 1,
+        "share_by_events": 0.3333, "share_by_articles": 0.1429}
+
+
+def test_event_detail_set_shares_degrade_without_groups(
+        event_env, monkeypatch):
+    # DDA_SETS_JSON pointing nowhere: only the set-shares
+    # block degrades to null; the page payload is intact.
+    monkeypatch.setenv("DDA_SETS_JSON", "/nonexistent.json")
+    data = _get(event_env, iso1="AAA", iso2="BBB",
+                as_of="2026-09-30")
+    assert data["windows"]["28"]["set_shares"] is None
+    assert data["windows"]["28"]["n_events"] == 6
 
 
 def test_country_form_names(event_env):

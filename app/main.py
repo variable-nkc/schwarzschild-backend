@@ -757,11 +757,15 @@ def create_app() -> FastAPI:
         # the poc_base mirror (Event detail page, Dan
         # 2026-11-16): map points, ADM1 counts, named actors,
         # sectors, tone, outlets, actor compositions, subtype
-        # rollup over the 7/28 days ending at the as-of.
-        # Needs the mirror AND the simplexes file (the Lund
-        # crosswalk the rest of the backend serves); either
-        # unset means 503, same discipline as the other dev
-        # endpoints. Same version gate.
+        # rollup and CAMEO set shares over the 7/28 days
+        # ending at the as-of. Needs the mirror AND the
+        # simplexes file (the Lund crosswalk the rest of the
+        # backend serves); either unset means 503, same
+        # discipline as the other dev endpoints. The set
+        # shares additionally read DDA_SETS_JSON when it is
+        # configured — without it (or with an unreadable
+        # file) only that block degrades to null; the page
+        # shows a note. Same version gate.
         from . import event_detail_store
 
         mirror = config.mirror_path()
@@ -801,8 +805,15 @@ def create_app() -> FastAPI:
             conn = event_detail_store.connect(mirror)
             try:
                 simplexes = dev_dda_store.load_simplexes(simplexes_p)
+                sets = None
+                sets_p = config.dda_sets_path()
+                if sets_p is not None and sets_p.exists():
+                    try:
+                        sets = dev_dda_store.load_sets(sets_p)
+                    except (OSError, ValueError):
+                        sets = None
                 data = event_detail_store.fetch_event_detail(
-                    conn, simplexes, iso1, iso2, as_of)
+                    conn, simplexes, iso1, iso2, as_of, sets=sets)
             finally:
                 conn.close()
         except (sqlite3.Error, OSError, ValueError) as exc:

@@ -60,6 +60,19 @@ tones, each event counting once; by_articles weights each
 event by its min_num_articles and takes the
 halfway-crossing value, the rule the simplex medians use.
 
+Set shares (Dan, 2026-11-16): when the caller supplies
+CAMEO set membership (cameo_groups.json, loaded by the
+endpoint when DDA_SETS_JSON is configured), each window
+also carries the five sets' shares of the slice — the
+weight of events whose code is in the set over the weight
+of ALL events in the slice, under both weightings (the
+S0m-style denominator; codes in no set count in the
+denominator only). The sets overlap, so the shares are
+independent marginals and do not sum to 1. Without
+membership the window's set_shares is None and the page
+shows a note instead — the rest of the page does not
+depend on the groups file.
+
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
 formal variants, and its demonym (RUSSIA / RUSSIAN / RUSSIAN
@@ -88,6 +101,10 @@ from .dev_dda_store import JOINT_DELTA
 MAP_GEO_TYPES = ("WORLD_CITY", "US_CITY", "WORLD_STATE", "US_STATE")
 TONE_EDGES = (-7.5, -5.0, -2.5, 0.0, 2.5)
 WINDOWS = (7, 28)
+#: The five CAMEO action sets, in the app's display order
+#: (mirrors dev_dda_store.ACTION_SETS).
+SET_ORDER = ("escalatory", "instability", "stability",
+             "deescalatory", "critical_incidents")
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -273,6 +290,7 @@ def _window_payload(
     forms1: set[str],
     forms2: set[str],
     subtype_labels: dict[str, str],
+    sets: dict[str, set[str]] | None = None,
 ) -> dict:
     n = len(rows)
     n_mapped = 0
@@ -293,8 +311,16 @@ def _window_payload(
     sub_acc: dict[str, _Acc] = {}
     sub_actors: dict[str, set[str]] = {}
     sub_coded = 0
+    set_counts: dict[str, list[int]] = {}
 
     for row in rows:
+        if sets is not None:
+            code = row["cameo_code"]
+            for name in SET_ORDER:
+                if code in sets.get(name, ()):
+                    slot = set_counts.setdefault(name, [0, 0])
+                    slot[0] += 1
+                    slot[1] += row["articles"] or 0
         simplex = clean.get(row["cameo_code"])
         if simplex is not None:
             n_mapped += 1
@@ -420,6 +446,22 @@ def _window_payload(
                 names.items(), key=lambda kv: (-kv[1], kv[0]))[:cap]
         ]
 
+    set_shares = None
+    if sets is not None:
+        total_articles = rep["articles"]
+        set_shares = []
+        for name in SET_ORDER:
+            n_set, a_set = set_counts.get(name, [0, 0])
+            set_shares.append({
+                "set": name,
+                "n_events": n_set,
+                "n_articles": a_set,
+                "share_by_events": (
+                    round(n_set / n, 4) if n else None),
+                "share_by_articles": (
+                    round(a_set / total_articles, 4)
+                    if total_articles else None),
+            })
     return {
         "n_events": n,
         "n_mapped": n_mapped,
@@ -441,6 +483,7 @@ def _window_payload(
             **{f"median_{key}": value for key, value
                in _tone_medians(tone_pairs_all).items()},
         },
+        "set_shares": set_shares,
         "reporting": {
             key: (round(val / n, 4) if n else None)
             for key, val in rep.items()
@@ -519,9 +562,12 @@ def fetch_event_detail(
     iso1: str,
     iso2: str,
     as_of: str | None,
+    sets: dict[str, set[str]] | None = None,
 ) -> dict:
     """Aggregates for one dyad over the 28 days ending at as_of
-    (default: the dyad's latest event date in the mirror)."""
+    (default: the dyad's latest event date in the mirror).
+    `sets` is optional CAMEO set membership for the set-shares
+    block; None leaves set_shares None in every window."""
     clean = clean_simplexes(simplexes)
     if as_of is None:
         row = conn.execute(
@@ -533,7 +579,8 @@ def fetch_event_detail(
     if as_of is None:
         return {
             "iso1": iso1, "iso2": iso2, "as_of": None,
-            "windows": {str(w): _window_payload([], clean, set(), set(), {})
+            "windows": {str(w): _window_payload(
+                [], clean, set(), set(), {}, sets)
                         for w in WINDOWS},
             "adm1_compare": [],
         }
@@ -626,7 +673,7 @@ def fetch_event_detail(
         start = start7 if w == 7 else start28
         sub = [r for r in rows if r["d"] >= start]
         payload = _window_payload(sub, clean, forms1, forms2,
-                                  subtype_labels)
+                                  subtype_labels, sets)
         adm1_by_window[w] = payload.pop("_adm1")
         windows[str(w)] = payload
     adm1_compare = [
