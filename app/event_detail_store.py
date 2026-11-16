@@ -38,9 +38,13 @@ events (Dan, 2026-11-16, replacing the mean after he reviewed
 the Ottawa/USA_CAN case): each phase's value is the median
 of that component (the articles-weighted median under the
 articles weighting), renormalized to sum to 1 so it stays a
-simplex; the summary reports that simplex, its dominant
-phase, and its median phase (the phase centroid of the
-median simplex). Component-wise medians mix components from
+simplex; the summary reports that simplex and its median
+phase (the phase centroid of the median simplex). (The
+dominant phase — the median simplex's largest component —
+was removed from the payload on 2026-11-16 at Dan's
+direction: the page now colours by a continuous gradient
+on the median phase instead.) Component-wise medians mix
+components from
 different events by construction — that is the statistic
 Dan reviewed. (A per-event modal-phase variant and the
 mean-simplex variant both shipped briefly and were removed
@@ -213,10 +217,6 @@ def _mean_phase(simplex: list[float]) -> float:
     return sum((k + 1) * v for k, v in enumerate(simplex))
 
 
-def _dominant(simplex: list[float]) -> int:
-    return max(range(5), key=lambda k: simplex[k]) + 1
-
-
 class _Acc:
     """Running composition + volume over a group of events.
 
@@ -275,7 +275,6 @@ class _Acc:
         simplex = [v / total for v in med]
         return {
             "simplex": [round(v, 6) for v in simplex],
-            "dominant_phase": _dominant(simplex),
             "median_phase": round(_mean_phase(simplex), 4),
         }
 

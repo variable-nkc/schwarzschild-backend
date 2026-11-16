@@ -39,8 +39,8 @@ def event_env(tmp_path, monkeypatch):
 
     City Two therefore holds three mapped events (one 190,
     two 030): its by-events median simplex is the 030 simplex
-    itself (median phase 1.7277, dominant p1) where the mean
-    would give 2.8021 — the median/mean discriminator.
+    itself (median phase 1.7277) where the mean would give
+    2.8021 — the median/mean discriminator.
     """
     db = tmp_path / "mirror.sqlite"
     con = sqlite3.connect(db)
@@ -158,13 +158,11 @@ def test_event_detail_aggregates(event_env):
     # Tones -6 and +1: rounded buckets {-6,-5} and {1,2} tie
     # at one event each; the tie resolves toward zero.
     assert one["mode_tone"] == 1.5
-    assert one["by_events"]["dominant_phase"] == 5
     assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
     # Articles-weighted median (ev1 has 4 articles, ev2 has 1):
     # the weight-4 event's simplex is the median on every
     # component, so the composition is ev1's near-pure p5.
-    assert one["by_articles"]["dominant_phase"] == 5
     assert one["by_articles"]["median_phase"] == pytest.approx(
         4.9510, abs=1e-3)
     assert one["by_articles"]["simplex"][4] == pytest.approx(
@@ -177,14 +175,12 @@ def test_event_detail_aggregates(event_env):
     # {-4,-3} and {1,2} tie, toward zero wins.
     assert two["mode_tone"] == 1.5
     # Median of {190, 030, 030} is the 030 simplex itself.
-    assert two["by_events"]["dominant_phase"] == 1
     assert two["by_events"]["median_phase"] == pytest.approx(
         1.7277, abs=1e-3)
     assert two["by_events"]["simplex"][0] == pytest.approx(
         0.49505, abs=1e-3)
     # Articles-weighted median mixes components across events
     # and needs the renormalization (raw sum 0.0246).
-    assert two["by_articles"]["dominant_phase"] == 5
     assert two["by_articles"]["median_phase"] == pytest.approx(
         3.0039, abs=1e-3)
     assert "Far City" not in points
@@ -244,7 +240,6 @@ def test_event_detail_aggregates(event_env):
     assert subs["GOV"]["by_articles"]["median_phase"] == (
         pytest.approx(4.9510, abs=1e-3))
     assert subs["MIL"]["n_events"] == 3
-    assert subs["MIL"]["by_events"]["dominant_phase"] == 1
     assert subs["MIL"]["by_events"]["median_phase"] == (
         pytest.approx(1.7277, abs=1e-3))
 
