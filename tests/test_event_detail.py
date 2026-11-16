@@ -154,6 +154,10 @@ def test_event_detail_aggregates(event_env):
     one = points["City One"]
     assert one["n_events"] == 2 and one["volume"] == 8
     assert one["mean_tone"] == -2.5
+    assert one["median_tone"] == -2.5
+    # Tones -6 and +1: rounded buckets {-6,-5} and {1,2} tie
+    # at one event each; the tie resolves toward zero.
+    assert one["mode_tone"] == 1.5
     assert one["by_events"]["dominant_phase"] == 5
     assert one["by_events"]["median_phase"] == pytest.approx(
         3.3394, abs=1e-3)
@@ -168,6 +172,10 @@ def test_event_detail_aggregates(event_env):
     two = points["City Two"]
     assert two["n_events"] == 3 and two["volume"] == 6
     assert two["mean_tone"] == pytest.approx(-0.3333, abs=1e-3)
+    assert two["median_tone"] == 0.0
+    # Tones -3, 0, +2: the zero is excluded from the mode;
+    # {-4,-3} and {1,2} tie, toward zero wins.
+    assert two["mode_tone"] == 1.5
     # Median of {190, 030, 030} is the 030 simplex itself.
     assert two["by_events"]["dominant_phase"] == 1
     assert two["by_events"]["median_phase"] == pytest.approx(
@@ -198,12 +206,17 @@ def test_event_detail_aggregates(event_env):
     }
     assert w["tone"]["buckets"] == [1, 1, 1, 0, 3, 0]
     assert w["tone"]["mean"] == pytest.approx(-2.3333, abs=1e-3)
+    assert w["tone"]["median"] == -1.5
+    assert w["tone"]["mode"] == 1.5
     assert w["reporting"] == {
         "sources": 1.6667, "articles": 2.1667, "mentions": 2.8333}
     assert w["outlets"] == [
-        {"name": "news.example.com", "n": 2, "mean_tone": -4.5},
-        {"name": "other.org", "n": 2, "mean_tone": 0.5},
-        {"name": "third.io", "n": 1, "mean_tone": 2.0},
+        {"name": "news.example.com", "n": 2, "mean_tone": -4.5,
+         "median_tone": -4.5, "mode_tone": -3.5},
+        {"name": "other.org", "n": 2, "mean_tone": 0.5,
+         "median_tone": 0.5, "mode_tone": 1.5},
+        {"name": "third.io", "n": 1, "mean_tone": 2.0,
+         "median_tone": 2.0, "mode_tone": 1.5},
     ]
     assert w["actor_pairs"] == {
         "sources": ["GENERAL SOMEONE", "CAPITAL CITY"],

@@ -47,6 +47,16 @@ mean-simplex variant both shipped briefly and were removed
 at Dan's direction; there is no fully unweighted variant —
 the by-events scheme is the record-count weighting.)
 
+Tone is aggregated three ways wherever it is displayed
+(Dan, 2026-11-16): the mean (the original), the median, and
+a modal bucket. The mode construction is Dan's: round
+init_avg_tone to 0 decimals (half away from zero), exclude
+rounded zeros entirely, bucket the rest into 2.0-point
+buckets ({1, 2}, {3, 4}, ... and {-2, -1}, {-4, -3}, ...),
+and report the modal bucket's midpoint; ties resolve toward
+the bucket closest to zero, then to the negative bucket. A
+group whose tones all round to zero has no mode (None).
+
 An actor counts as country-level when its name is one of the
 country's bare-country forms — the country name itself, its
 formal variants, and its demonym (RUSSIA / RUSSIAN / RUSSIAN
@@ -65,6 +75,7 @@ visible in the sector strip and subtype rollup.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import statistics
 from datetime import date, timedelta
@@ -155,6 +166,49 @@ def _country_form_names(
     return forms
 
 
+def _round0(value: float) -> int:
+    """Round to 0 decimals, half away from zero (the plain
+    reading of 'round to 0 decimals'; Python's round() would
+    banker's-round exact halves)."""
+    return int(math.floor(abs(value) + 0.5)) * (
+        -1 if value < 0 else 1)
+
+
+def _tone_mode(tones: list[float]) -> float | None:
+    """Modal 2.0-point bucket of the rounded tones, zeros
+    excluded, reported at the bucket midpoint (Dan's
+    construction; see the module docstring)."""
+    counts: dict[int, int] = {}
+    for tone in tones:
+        r = _round0(tone)
+        if r == 0:
+            continue
+        if r > 0:
+            low = (r - 1) // 2 * 2 + 1
+        else:
+            low = -(((-r - 1) // 2) * 2 + 2)
+        counts[low] = counts.get(low, 0) + 1
+    if not counts:
+        return None
+    best = max(
+        counts,
+        key=lambda lo: (counts[lo], -abs(lo + 0.5), -lo))
+    return best + 0.5
+
+
+def _tone_stats(tones: list[float]) -> dict:
+    """Mean / median / mode for a group of first-mention
+    tones (each rounded to 4 decimals; mode at its natural
+    1-decimal midpoint)."""
+    if not tones:
+        return {"mean": None, "median": None, "mode": None}
+    return {
+        "mean": round(sum(tones) / len(tones), 4),
+        "median": round(statistics.median(tones), 4),
+        "mode": _tone_mode(tones),
+    }
+
+
 def _mean_phase(simplex: list[float]) -> float:
     return sum((k + 1) * v for k, v in enumerate(simplex))
 
@@ -173,12 +227,12 @@ class _Acc:
     slice the endpoint already materializes.
     """
 
-    __slots__ = ("n", "volume", "tone_sum", "items")
+    __slots__ = ("n", "volume", "tones", "items")
 
     def __init__(self) -> None:
         self.n = 0
         self.volume = 0
-        self.tone_sum = 0.0
+        self.tones: list[float] = []
         self.items: list[tuple[tuple[float, ...], float]] = []
 
     @property
@@ -189,7 +243,7 @@ class _Acc:
         self.n += 1
         self.volume += row["mentions"] or 0
         if row["tone"] is not None:
-            self.tone_sum += row["tone"]
+            self.tones.append(row["tone"])
         if simplex is not None:
             self.items.append((simplex, row["articles"] or 0))
 
@@ -250,7 +304,7 @@ def _window_payload(
     sectors: dict[str, int] = {}
     sectors_coded = 0
     tone_buckets = [0] * 6
-    tone_sum = 0.0
+    tones_all: list[float] = []
     rep = {"sources": 0.0, "articles": 0.0, "mentions": 0.0}
     outlets: dict[str, list] = {}
     pairs: dict[tuple[str, str], int] = {}
@@ -264,7 +318,7 @@ def _window_payload(
         if simplex is not None:
             n_mapped += 1
         if row["tone"] is not None:
-            tone_sum += row["tone"]
+            tones_all.append(row["tone"])
             bucket = 0
             while bucket < 5 and row["tone"] >= TONE_EDGES[bucket]:
                 bucket += 1
@@ -273,10 +327,10 @@ def _window_payload(
         rep["articles"] += row["articles"] or 0
         rep["mentions"] += row["mentions"] or 0
         if row["domain"]:
-            slot = outlets.setdefault(row["domain"], [0, 0.0])
+            slot = outlets.setdefault(row["domain"], [0, []])
             slot[0] += 1
             if row["tone"] is not None:
-                slot[1] += row["tone"]
+                slot[1].append(row["tone"])
 
         if row["geo_id"] is not None and row["geo_type"]:
             if row["adm1"]:
@@ -322,11 +376,14 @@ def _window_payload(
 
     map_points = []
     for gid, acc in geo_acc.items():
+        stats = _tone_stats(acc.tones)
         point = {
             **geo_meta[gid],
             "n_events": acc.n,
             "volume": acc.volume,
-            "mean_tone": round(acc.tone_sum / acc.n, 4) if acc.n else None,
+            "mean_tone": stats["mean"],
+            "median_tone": stats["median"],
+            "mode_tone": stats["mode"],
         }
         point.update(acc.composition())
         map_points.append(point)
@@ -399,7 +456,7 @@ def _window_payload(
         },
         "tone": {
             "buckets": tone_buckets,
-            "mean": round(tone_sum / n, 4) if n else None,
+            **_tone_stats(tones_all),
         },
         "reporting": {
             key: (round(val / n, 4) if n else None)
@@ -407,7 +464,8 @@ def _window_payload(
         },
         "outlets": [
             {"name": name, "n": slot[0],
-             "mean_tone": round(slot[1] / slot[0], 4)}
+             **{f"{key}_tone": value
+                for key, value in _tone_stats(slot[1]).items()}}
             for name, slot in sorted(
                 outlets.items(), key=lambda kv: (-kv[1][0], kv[0]))[:8]
         ],
