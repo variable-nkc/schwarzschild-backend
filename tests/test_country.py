@@ -199,9 +199,9 @@ def test_country_aggregates_n_flagged(
     assert by["FRA"]["n_flagged"] == 1   # GBR_FRA hot
     assert by["DEU"]["n_flagged"] == 0   # insufficient only
     assert by["ITA"]["n_flagged"] == 0   # steady only
-    # pill_max is emitted on every row even with no predictive
+    # pill_p60 is emitted on every row even with no predictive
     # dict behind it (value None, key present).
-    assert all(c["pill_max"] is None for c in by.values())
+    assert all(c["pill_p60"] is None for c in by.values())
 
 
 def test_country_aggregates_scoped_dyads(country_env: TestClient) -> None:
@@ -280,7 +280,7 @@ def _predictive_file(tmp_path: Path) -> Path:
     return pred
 
 
-def test_country_aggregates_pill_max(
+def test_country_aggregates_pill_p60(
         country_env: TestClient, tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PREDICTIVE_SQLITE",
@@ -289,32 +289,36 @@ def test_country_aggregates_pill_max(
                         params={"as_of": "2026-09-30"})
     assert r.status_code == 200
     by = _by_country(r.json()["data"])
-    assert by["USA"]["pill_max"] == pytest.approx(0.9)
-    assert by["CAN"]["pill_max"] == pytest.approx(0.9)
-    assert by["MEX"]["pill_max"] == pytest.approx(0.7)
+    # p60 over each country's feeding dyads' pills:
+    # USA [0.4, 0.9] -> 0.70, CAN [0.7, 0.9] -> 0.82,
+    # MEX [0.4, 0.7] -> 0.58 (linear interpolation).
+    assert by["USA"]["pill_p60"] == pytest.approx(0.7)
+    assert by["CAN"]["pill_p60"] == pytest.approx(0.82)
+    assert by["MEX"]["pill_p60"] == pytest.approx(0.58)
     # FRA's dyads have no summary row at this as-of.
-    assert by["FRA"]["pill_max"] is None
-    assert by["DEU"]["pill_max"] is None
-    # Scoped + targets view: the max runs over the slot's dyads.
+    assert by["FRA"]["pill_p60"] is None
+    assert by["DEU"]["pill_p60"] is None
+    # Scoped + targets view: the percentile runs over the
+    # slot's dyads only.
     r = country_env.get(
         "/dev/country-aggregates",
         params={"as_of": "2026-09-30", "view": "targets",
                 "dyads": "USA_CAN,USA_MEX,CAN_MEX"})
     by = _by_country(r.json()["data"])
-    assert by["CAN"]["pill_max"] == pytest.approx(0.9)
-    assert by["MEX"]["pill_max"] == pytest.approx(0.7)
+    assert by["CAN"]["pill_p60"] == pytest.approx(0.9)
+    assert by["MEX"]["pill_p60"] == pytest.approx(0.58)
     assert "USA" not in by
 
 
 def test_country_aggregates_pill_degrades(
         country_env: TestClient, tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch) -> None:
-    # Unset: pill_max present but null, endpoint still serves.
+    # Unset: pill_p60 present but null, endpoint still serves.
     monkeypatch.delenv("PREDICTIVE_SQLITE", raising=False)
     r = country_env.get("/dev/country-aggregates",
                         params={"as_of": "2026-09-30"})
     assert r.status_code == 200
-    assert all(c["pill_max"] is None
+    assert all(c["pill_p60"] is None
                for c in r.json()["data"]["countries"])
     # Configured but the file does not exist: same degradation.
     monkeypatch.setenv("PREDICTIVE_SQLITE",
@@ -322,7 +326,7 @@ def test_country_aggregates_pill_degrades(
     r = country_env.get("/dev/country-aggregates",
                         params={"as_of": "2026-09-30"})
     assert r.status_code == 200
-    assert all(c["pill_max"] is None
+    assert all(c["pill_p60"] is None
                for c in r.json()["data"]["countries"])
     # Configured, file exists, summary table absent: same.
     bare = tmp_path / "bare.sqlite"
@@ -334,7 +338,7 @@ def test_country_aggregates_pill_degrades(
     r = country_env.get("/dev/country-aggregates",
                         params={"as_of": "2026-09-30"})
     assert r.status_code == 200
-    assert all(c["pill_max"] is None
+    assert all(c["pill_p60"] is None
                for c in r.json()["data"]["countries"])
 
 
@@ -372,13 +376,14 @@ def test_fetch_country_aggregates_pill_by_dyad(tmp_path: Path) -> None:
             rconn, mconn, "2026-09-30",
             pill_by_dyad={("USA", "CAN"): 0.9, ("CAN", "MEX"): 0.7})
         by = _by_country(data)
-        assert by["USA"]["pill_max"] == pytest.approx(0.9)
-        assert by["CAN"]["pill_max"] == pytest.approx(0.9)
-        assert by["MEX"]["pill_max"] == pytest.approx(0.7)
-        assert by["FRA"]["pill_max"] is None
+        assert by["USA"]["pill_p60"] == pytest.approx(0.9)
+        # CAN is fed by both dyads: p60 of [0.7, 0.9].
+        assert by["CAN"]["pill_p60"] == pytest.approx(0.82)
+        assert by["MEX"]["pill_p60"] == pytest.approx(0.7)
+        assert by["FRA"]["pill_p60"] is None
         data = country_store.fetch_country_aggregates(
             rconn, mconn, "2026-09-30")
-        assert all(c["pill_max"] is None for c in data["countries"])
+        assert all(c["pill_p60"] is None for c in data["countries"])
     finally:
         rconn.close()
         mconn.close()

@@ -215,7 +215,7 @@ def _load_pill_by_dyad(as_of: str) -> dict | None:
     connection, PRAGMA column check). The predictive DB is
     optional: unset, missing, or lacking the summary table /
     exc45_max column all degrade to None — the country fold
-    then emits pill_max nulls and the endpoint still serves.
+    then emits pill_p60 nulls and the endpoint still serves.
     """
     from .config import predictive_path
 
@@ -661,7 +661,7 @@ def create_app() -> FastAPI:
         # Scoped mode (Scan context map, 2026-11-13): `dyads`
         # restricts the fold to the given dyads in BOTH slices
         # and `view` picks the fed slot(s); rows also carry
-        # n_flagged and pill_max (the predictive summary's
+        # n_flagged and pill_p60 (the predictive summary's
         # exc45_max at the effective as-of, when configured).
         from . import country_store
 

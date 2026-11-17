@@ -21,11 +21,18 @@ Metrics (Dan, 2026-11-03, as agreed after review):
   drifting, or atypical (gallery precedent), insufficient
   included in the denominator.
 - n_flagged: the flagged count behind that share.
-- pill_max: the highest validated exceedance (exc45_max from
-  the predictive build's dyad_predictive_summary at the
-  effective as-of) over the dyads feeding the country, when
-  the caller supplies a pill dict; null otherwise. Annotation
-  only — it never alters a rollup metric.
+- pill_p60: the 60th percentile (linear interpolation) of
+  the validated exceedance (exc45_max from the predictive
+  build's dyad_predictive_summary at the effective as-of)
+  over the dyads feeding the country, when the caller
+  supplies a pill dict; null otherwise. A percentile, not
+  the max (Dan, 2026-11-17): pills are bimodal, so a
+  per-country max saturates — at 2026-09-30 the median
+  country's max was 1.000 with 97% of countries above 0.9,
+  and even the 75th percentile left half the countries
+  above 0.9; the 60th percentile spreads across the scale
+  (median 0.12, IQR 0.03-0.71). Annotation only — it never
+  alters a rollup metric.
 
 Grouping is the involvement view by default (gallery
 precedent): a dyad counts toward BOTH its countries, so each
@@ -335,7 +342,7 @@ def fetch_country_aggregates(
         if slot is None:
             slot = {"vol_now": 0.0, "vol_prior": 0.0, "temps": [],
                     "label_counts": {}, "n_dyads": 0, "n_flagged": 0,
-                    "pill_max": None}
+                    "pills": []}
             acc[country] = slot
         return slot
 
@@ -361,9 +368,7 @@ def fetch_country_aggregates(
             if _temp is not None and vol >= TEMP_VOLUME_FLOOR:
                 slot["temps"].append(float(_temp))
             if pill is not None:
-                slot["pill_max"] = (
-                    pill if slot["pill_max"] is None
-                    else max(slot["pill_max"], pill))
+                slot["pills"].append(pill)
 
     if prior_as_of is not None:
         for iso1, iso2, v_7d, _temp, _label in rollup_conn.execute(
@@ -410,7 +415,8 @@ def fetch_country_aggregates(
             "n_flagged": slot["n_flagged"],
             "share_flagged": (slot["n_flagged"] / slot["n_dyads"]
                               if slot["n_dyads"] else None),
-            "pill_max": slot["pill_max"],
+            "pill_p60": (_percentile(sorted(slot["pills"]), 60)
+                         if slot["pills"] else None),
         })
 
     features = _load_geometry(mirror_conn)
