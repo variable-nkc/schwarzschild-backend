@@ -1068,9 +1068,11 @@ def _series_block(daily: dict, cfg: PipelineConfig) -> dict:
 
 
 def _forecast_block(series: dict, cfg: PipelineConfig,
-                    uniq_daily: np.ndarray | None = None) -> dict:
+                    uniq_daily: np.ndarray | None = None,
+                    models: list[str] | None = None) -> dict:
     fc = cfg.forecast
-    if not fc.models:
+    models = list(fc.models) if models is None else models
+    if not models:
         return {"status": "not_run"}
     Z = np.array(series["ilr"])
     w = np.array(series["w_used"])
@@ -1078,7 +1080,7 @@ def _forecast_block(series: dict, cfg: PipelineConfig,
     return forecast_from_arrays(
         Z, w, n_eff,
         horizons=[int(h) for h in fc.horizons],
-        models=list(fc.models),
+        models=models,
         params=dict(fc.params),
         uniq_daily=uniq_daily,
         origins=list(fc.origins),
@@ -1174,12 +1176,35 @@ def run_pipeline(body: dict, records: dict, corpus: dict | None,
 
     series = _series_block(daily, cfg)
 
-    forecast_block: dict = {"unweighted": _forecast_block(series, cfg)}
+    # --- forecasting ladder -------------------------------------
+    # F3 REPAIR (Dan, 2026-11-17): the original PoC never
+    # passed the uniqueness series to the unweighted block,
+    # so selecting F3 raised "F3 requires uniq_daily" and
+    # killed the whole run. The uniqueness series is a
+    # property of the dyad's records, shared by both
+    # ladders, so when TF-IDF is on it now goes to BOTH
+    # blocks. When TF-IDF is off no uniqueness series
+    # exists, so F3 is dropped from the model list with a
+    # warning instead of failing the run. (The original
+    # seqbayes api.py carries the identical repair.)
+    uniq_daily = None
     if tfidf_block.get("enabled") and "ilr" in series_tfidf:
         uniq_daily = _daily_uniqueness(series_tfidf["dates"],
                                        tfidf_block["window_metrics"])
+    fc_models = list(cfg.forecast.models)
+    if "F3" in fc_models and uniq_daily is None:
+        fc_models = [m for m in fc_models if m != "F3"]
+        warnings.append(
+            "F3 skipped: it is gated on code uniqueness — "
+            "enable TF-IDF to run it.")
+    forecast_block: dict = {
+        "unweighted": _forecast_block(series, cfg,
+                                      uniq_daily=uniq_daily,
+                                      models=fc_models)}
+    if uniq_daily is not None:
         forecast_block["tfidf"] = _forecast_block(
-            series_tfidf, cfg, uniq_daily=uniq_daily)
+            series_tfidf, cfg, uniq_daily=uniq_daily,
+            models=fc_models)
     else:
         forecast_block["tfidf"] = {"status": "not_enabled"}
 

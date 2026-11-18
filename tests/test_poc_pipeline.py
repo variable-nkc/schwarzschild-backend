@@ -145,6 +145,43 @@ def test_poc_tfidf(poc_env: TestClient) -> None:
     assert data["anomaly"]["tfidf"]["scores"]["composite"]
 
 
+def test_poc_f3_with_tfidf(poc_env: TestClient) -> None:
+    """F3 repair (Dan, 2026-11-17): with TF-IDF on, the
+    uniqueness series reaches BOTH ladders, so F3 runs in
+    the unweighted block too (it raised in the original)."""
+    body = json.loads(json.dumps(BODY))
+    body["tfidf"] = {"enabled": True, "window_days": 28,
+                     "tf_mode": "share"}
+    body["forecast"]["models"] = ["F2", "F3"]
+    r = poc_env.post("/dev/poc-pipeline", json=body)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    for side in ("unweighted", "tfidf"):
+        assert "F3" in data["forecast"][side], side
+        assert "F2" in data["forecast"][side], side
+        leaf = data["forecast"][side]["F3"]["45"]
+        assert len(leaf["path"]) == 5
+        # F3 differs from F2 only via the uniqueness-modulated
+        # threshold; both are valid simplex points.
+        assert sum(leaf["path"]) == pytest.approx(1.0)
+    assert not any("F3 skipped" in w
+                   for w in data["meta"]["warnings"])
+
+
+def test_poc_f3_without_tfidf_skips(poc_env: TestClient) -> None:
+    """F3 with TF-IDF off: skipped with a warning, the rest
+    of the run proceeds (no 400, no missing F1)."""
+    body = json.loads(json.dumps(BODY))
+    body["forecast"]["models"] = ["F1", "F3"]
+    r = poc_env.post("/dev/poc-pipeline", json=body)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    fc = data["forecast"]["unweighted"]
+    assert "F1" in fc and "F3" not in fc
+    assert any("F3 skipped" in w
+               for w in data["meta"]["warnings"])
+
+
 def test_poc_setshare_key_ignored(poc_env: TestClient) -> None:
     body = json.loads(json.dumps(BODY))
     body["setshare"] = {"enabled": True}
