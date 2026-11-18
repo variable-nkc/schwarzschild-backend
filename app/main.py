@@ -1548,6 +1548,45 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/poc-extent", response_model=None)
+    async def poc_extent_endpoint(
+        iso1: str = Query(...),
+        iso2: str = Query(...),
+        api_version: str | None = Query(default=None),
+    ) -> JSONResponse | dict:
+        # The dyad's record extent in the DDA sidecar, for the
+        # R&D page's timeframe defaults/clamps (2026-11-18):
+        # the PoC pipeline cold-starts at the requested start,
+        # so a start before the first record leaves the series
+        # idling at the prior and the anomaly scores spike when
+        # data begins. The page defaults its start to the first
+        # record date and warns when a picked start precedes it.
+        from . import poc_pipeline
+
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if dda is None or simplexes_p is None:
+            return _lc_missing(
+                provenance,
+                "POC EXTENT — no usable DDA sidecar: set "
+                "DDA_SQLITE and DDA_SIMPLEXES_JSON.",
+            )
+        try:
+            conn = lc_store.connect(dda)
+            try:
+                data = poc_pipeline.record_extent(conn, iso1, iso2)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        data = {"dyad": f"{iso1}_{iso2}", **data}
+        return _ok(provenance, warnings, data)
+
     return app
 
 

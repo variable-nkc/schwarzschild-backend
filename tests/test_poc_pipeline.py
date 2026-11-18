@@ -190,6 +190,28 @@ def test_poc_setshare_key_ignored(poc_env: TestClient) -> None:
     assert "setshare" not in r.json()["data"]
 
 
+def test_poc_extent(poc_env: TestClient) -> None:
+    r = poc_env.get("/dev/poc-extent", params={"iso1": "AAA",
+                                               "iso2": "BBB"})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["dyad"] == "AAA_BBB"
+    assert data["first"] == START.isoformat()
+    assert data["last"] == (START + timedelta(days=399)).isoformat()
+    # 3 rows/day always + the 020 row on days where i % 7 != 0
+    assert data["n_records"] == 400 * 3 + sum(
+        1 for i in range(400) if i % 7 != 0)
+
+
+def test_poc_extent_unknown_dyad(poc_env: TestClient) -> None:
+    r = poc_env.get("/dev/poc-extent", params={"iso1": "XXX",
+                                               "iso2": "YYY"})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["first"] is None and data["last"] is None
+    assert data["n_records"] == 0
+
+
 def test_poc_bad_body(poc_env: TestClient) -> None:
     r = poc_env.post("/dev/poc-pipeline", json={"timeframe": {}})
     assert r.status_code == 400

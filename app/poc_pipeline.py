@@ -1281,6 +1281,21 @@ def load_corpus(conn: sqlite3.Connection, iso1: str, iso2: str,
     return _rows_to_records(rows, with_dyads=True)
 
 
+def record_extent(conn: sqlite3.Connection, iso1: str, iso2: str) -> dict:
+    """The dyad's full record extent in the sidecar, unfiltered
+    by any timeframe: {first, last, n_records}; the dates are
+    None when the dyad has no records. The R&D page defaults
+    and clamps its timeframe start to this coverage: the
+    pipeline cold-starts at the requested start, so a start
+    months before the first record idles the series at the
+    prior and the anomaly detectors spike when data begins
+    (diagnosed 2026-11-18)."""
+    first, last, n = conn.execute(
+        "SELECT MIN(obs_date), MAX(obs_date), COUNT(*) FROM dda "
+        "WHERE iso1 = ? AND iso2 = ?", (iso1, iso2)).fetchone()
+    return {"first": first, "last": last, "n_records": int(n or 0)}
+
+
 def load_daily_volume(conn: sqlite3.Connection, iso1: str, iso2: str,
                       start: str, end: str) -> np.ndarray:
     start_ord = int(np.datetime64(start, "D").astype(np.int64))
