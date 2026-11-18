@@ -61,7 +61,7 @@ version). See ``app/versioning.py`` for strict vs warn behaviour.
 
 import sqlite3
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import config, store
@@ -1468,6 +1468,80 @@ def create_app() -> FastAPI:
                 if rollup_conn is not None:
                     rollup_conn.close()
         except (sqlite3.Error, OSError, ValueError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
+    @app.post("/dev/poc-pipeline", response_model=None)
+    async def poc_pipeline_endpoint(
+        request: Request,
+        api_version: str | None = Query(default=None),
+    ) -> JSONResponse | dict:
+        # PoC analytics pipeline for the R&D page (2026-11-17):
+        # the original PoC dashboard's Lund-state figures
+        # (trends, forecast ladder, anomaly + temperature,
+        # TF-IDF) computed by app/poc_pipeline from the DDA
+        # sidecar — the same source as the other /lc and /dev
+        # endpoints. The request body IS the PoC POST body
+        # (the poc_app contract); a "setshare" key is accepted
+        # and ignored (set-share figures excluded by Dan,
+        # 2026-11-17 — the vetted versions live in Dig/Vet).
+        from . import poc_pipeline
+
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if dda is None or simplexes_p is None:
+            return _lc_missing(
+                provenance,
+                "POC PIPELINE — no usable DDA sidecar: set "
+                "DDA_SQLITE and DDA_SIMPLEXES_JSON.",
+            )
+        try:
+            body = await request.json()
+        except ValueError:
+            return _fail(provenance, warnings, 400, "bad_body",
+                         "Request body must be a JSON object.")
+        if not isinstance(body, dict):
+            return _fail(provenance, warnings, 400, "bad_body",
+                         "Request body must be a JSON object.")
+        dyad_id = str(body.get("dyad_id") or "")
+        parts = dyad_id.split("_")
+        timeframe = body.get("timeframe") or {}
+        start = str(timeframe.get("start") or "")
+        end = str(timeframe.get("end") or "")
+        if len(parts) != 2 or not all(parts) or not start or not end:
+            return _fail(
+                provenance, warnings, 400, "bad_body",
+                "Body needs dyad_id 'ISO1_ISO2' and timeframe "
+                "{start, end}.")
+        iso1, iso2 = parts
+        try:
+            conn = lc_store.connect(dda)  # type: ignore[arg-type]
+            try:
+                simplexes = dev_dda_store.load_simplexes(
+                    simplexes_p)  # type: ignore[arg-type]
+                crosswalk = poc_pipeline.crosswalk_from_simplexes(
+                    simplexes)
+                records = poc_pipeline.load_records(
+                    conn, iso1, iso2, start, end)
+                corpus = None
+                if (body.get("tfidf") or {}).get("enabled"):
+                    corpus = poc_pipeline.load_corpus(
+                        conn, iso1, iso2, start, end)
+                volume = poc_pipeline.load_daily_volume(
+                    conn, iso1, iso2, start, end)
+                data = poc_pipeline.run_pipeline(
+                    body, records, corpus, crosswalk, volume)
+            finally:
+                conn.close()
+        except (ValueError, TypeError) as exc:
+            return _fail(provenance, warnings, 400, "bad_config",
+                         str(exc))
+        except (sqlite3.Error, OSError) as exc:
             return _fail(
                 provenance, warnings, 503, "db_error",
                 f"Could not read DDA sidecar: {exc}",
