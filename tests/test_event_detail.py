@@ -427,6 +427,38 @@ def test_event_detail_503_when_unconfigured(tmp_path, monkeypatch):
     assert resp.status_code == 503
 
 
+def test_event_detail_limit_refuses_over_cap(
+        event_env, monkeypatch):
+    """EVENT_DETAIL_MAX_EVENTS (Dan, 2026-11-18): the
+    fixture slice holds 7 dyad rows in the 28d window
+    before the geo filter; a cap of 5 refuses BOTH
+    endpoints with the dedicated 503 (never a silent
+    truncation), and a cap above the slice size serves
+    normally."""
+    monkeypatch.setenv("EVENT_DETAIL_MAX_EVENTS", "5")
+    resp = event_env.get(
+        "/dev/event-detail",
+        params={"iso1": "AAA", "iso2": "BBB",
+                "as_of": "2026-09-30"})
+    assert resp.status_code == 503, resp.text
+    err = resp.json()["error"]
+    assert err["code"] == "event_detail_limit"
+    assert "7" in err["message"]
+    assert "5" in err["message"]
+    resp = event_env.get(
+        "/dev/event-detail/group",
+        params={"iso1": "AAA", "iso2": "BBB",
+                "as_of": "2026-09-30", "window": "28",
+                "kind": "geo", "key": "1"})
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"]["code"] == \
+        "event_detail_limit"
+    monkeypatch.setenv("EVENT_DETAIL_MAX_EVENTS", "100")
+    data = _get(event_env, iso1="AAA", iso2="BBB",
+                as_of="2026-09-30")
+    assert data["windows"]["28"]["n_events"] == 6
+
+
 def _get_group(client, **params):
     resp = client.get("/dev/event-detail/group", params=params)
     assert resp.status_code == 200, resp.text

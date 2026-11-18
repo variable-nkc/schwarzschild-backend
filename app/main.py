@@ -816,6 +816,12 @@ def create_app() -> FastAPI:
                     conn, simplexes, iso1, iso2, as_of, sets=sets)
             finally:
                 conn.close()
+        except event_detail_store.EventDetailLimitExceeded \
+                as exc:
+            return _fail(
+                provenance, warnings, 503,
+                "event_detail_limit", str(exc),
+            )
         except (sqlite3.Error, OSError, ValueError) as exc:
             return _fail(
                 provenance, warnings, 503, "db_error",
@@ -909,6 +915,12 @@ def create_app() -> FastAPI:
                     labels=labels)
             finally:
                 conn.close()
+        except event_detail_store.EventDetailLimitExceeded \
+                as exc:
+            return _fail(
+                provenance, warnings, 503,
+                "event_detail_limit", str(exc),
+            )
         except ValueError as exc:
             return _fail(
                 provenance, warnings, 400, "bad_request",

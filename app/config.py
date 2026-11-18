@@ -166,6 +166,32 @@ def mirror_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+def event_detail_max_events() -> int:
+    """Return the EVENT_DETAIL_MAX_EVENTS cap, or 0.
+
+    DEV ONLY (Dan, 2026-11-18): an operator-set ceiling on
+    the event rows a single /dev/event-detail or
+    /dev/event-detail/group call will process — a safety
+    valve for hosts that cannot grind through a heavy
+    dyad's 28-day slice (the endpoints aggregate the full
+    slice in memory, so an uncapped call on a weak host
+    ends in a client timeout with no explanation). When
+    the dyad's slice exceeds the cap the store refuses
+    with a 503 naming the counts, rather than truncating:
+    every figure on the page is an aggregate over the
+    full slice, so a partial slice would misstate them
+    all. Unset, unparseable or non-positive means no cap
+    (the pre-2026-11-18 behaviour); the cap costs one
+    count query per call and is only paid when set.
+    """
+    raw = os.getenv("EVENT_DETAIL_MAX_EVENTS",
+                    "").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def version_mode() -> str:
     """Return 'strict' or 'warn', defaulting to strict (fail closed).
 

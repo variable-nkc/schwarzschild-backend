@@ -124,7 +124,28 @@ import statistics
 from datetime import date, timedelta
 from pathlib import Path
 
+from . import config
 from .dev_dda_store import JOINT_DELTA
+
+
+class EventDetailLimitExceeded(Exception):
+    """The dyad's 28-day slice exceeds the operator's
+    EVENT_DETAIL_MAX_EVENTS cap (Dan, 2026-11-18).
+    Raised by _load_rows before any heavy work; the
+    endpoints map it to a 503 naming the counts. The
+    store refuses rather than truncating — every
+    figure the page shows is an aggregate over the
+    full slice, so a partial slice would misstate
+    them all."""
+
+    def __init__(self, count: int, limit: int):
+        super().__init__(
+            f"Event detail slice has {count:,} events, "
+            f"over the EVENT_DETAIL_MAX_EVENTS limit "
+            f"of {limit:,}; raise the limit in .env or "
+            f"narrow the request.")
+        self.count = count
+        self.limit = limit
 
 MAP_GEO_TYPES = ("WORLD_CITY", "US_CITY", "WORLD_STATE", "US_STATE")
 #: Tone histogram bins (Dan, 2026-11-16; boundary rule
@@ -716,7 +737,8 @@ def fetch_event_detail(
             "adm1_compare": [],
         }
     rows, start28, start7, subtype_labels = _load_rows(
-        conn, iso1, iso2, as_of)
+        conn, iso1, iso2, as_of,
+        max_events=config.event_detail_max_events())
 
     names1 = {r["actor1_name"] for r in rows if r["actor1_name"]}
     names2 = {r["actor2_name"] for r in rows if r["actor2_name"]}
@@ -774,16 +796,34 @@ def _resolve_as_of(
 
 def _load_rows(
     conn: sqlite3.Connection, iso1: str, iso2: str, as_of: str,
+    max_events: int = 0,
 ) -> tuple[list[dict], str, str, dict[str, str]]:
     """Fetch and resolve one dyad's 28-day slice ending at
     as_of (a concrete date): the geo restriction applied,
     actor names/subtypes and outlet domains attached.
     Returns (rows, start28, start7, subtype_labels). Shared
     by fetch_event_detail and fetch_group_detail so the
-    drill-down always sees exactly the figures' rows."""
+    drill-down always sees exactly the figures' rows.
+    When max_events is positive (the operator's
+    EVENT_DETAIL_MAX_EVENTS cap), a pre-flight count of
+    the dyad's rows in the window runs first and an
+    over-cap slice raises EventDetailLimitExceeded
+    before any heavy work happens."""
     end = date.fromisoformat(as_of)
     start28 = (end - timedelta(days=27)).isoformat()
     start7 = (end - timedelta(days=6)).isoformat()
+
+    if max_events:
+        n_slice = conn.execute(
+            "SELECT count(*) FROM gdelt_events_core "
+            "WHERE event_date BETWEEN ? AND ? "
+            "AND actor1_country_code = ? "
+            "AND actor2_country_code = ?",
+            (start28, as_of, iso1, iso2),
+        ).fetchone()[0]
+        if n_slice > max_events:
+            raise EventDetailLimitExceeded(
+                n_slice, max_events)
 
     raw = conn.execute(
         """
@@ -911,7 +951,8 @@ def fetch_group_detail(
     if as_of is None:
         return base
     rows, start28, start7, subtype_labels = _load_rows(
-        conn, iso1, iso2, as_of)
+        conn, iso1, iso2, as_of,
+        max_events=config.event_detail_max_events())
     start = start7 if window == 7 else start28
     sub = [r for r in rows if r["d"] >= start]
 
