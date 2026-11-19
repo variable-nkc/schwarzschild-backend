@@ -458,17 +458,27 @@ def fetch_dyads(
     if effective is None or not pairs:
         return effective, [], [f"{a}_{b}" for a, b in pairs]
     wanted = [f"{a}_{b}" for a, b in pairs]
+    # One UNION ALL branch per dyad, NOT one OR-ed scan:
+    # each branch SEARCHes idx_rollup_dyad (iso1, iso2,
+    # as_of) exactly like fetch_dyad, touching a handful
+    # of pages per dyad. The single-WHERE form plans as a
+    # scan of the whole as-of partition through
+    # idx_rollup_asof_label instead — measured ~50 s for
+    # two dyads on a cold page cache vs ~0.1 s here
+    # (2026-11-19). Chunked at 250 branches per statement
+    # (SQLITE_MAX_COMPOUND_SELECT is 500 by default).
+    rows: list = []
     with _connect(path) as conn:
-        where = " OR ".join(
-            "(iso1 = ? AND iso2 = ?)" for _ in pairs)
-        params: list = [effective]
-        for a, b in pairs:
-            params += [a, b]
-        rows = conn.execute(
-            "SELECT * FROM dyad_status_rollup "
-            f"WHERE as_of = ? AND ({where})",
-            params,
-        ).fetchall()
+        for start in range(0, len(pairs), 250):
+            chunk = pairs[start:start + 250]
+            sql = " UNION ALL ".join(
+                "SELECT * FROM dyad_status_rollup "
+                "WHERE iso1 = ? AND iso2 = ? AND as_of = ?"
+                for _ in chunk)
+            params: list = []
+            for a, b in chunk:
+                params += [a, b, effective]
+            rows += conn.execute(sql, params).fetchall()
     by_code = {
         f"{r['iso1']}_{r['iso2']}": _row_to_dict(r) for r in rows}
     ordered = [by_code[c] for c in wanted if c in by_code]
