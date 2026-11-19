@@ -245,6 +245,48 @@ def test_dyad_status_full_row_and_provenance(client: TestClient) -> None:
     assert row["flag_drifting"] is False
 
 
+def test_dyad_status_bulk_rows_missing_and_order(
+        client: TestClient) -> None:
+    """Bulk form (Scan quick load): one response carrying
+    every requested dyad's full row in request order,
+    plus the codes with no row at the as-of — the bulk
+    form of the single form's 404, so batching loses no
+    information."""
+    resp = client.get(
+        "/dyad-status",
+        params={"dyads": "USA_IRN,USA_CAN,USA_XXX",
+                "as_of": "2026-09-30"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    codes = [f"{r['iso1']}_{r['iso2']}" for r in data["rows"]]
+    assert codes == ["USA_IRN", "USA_CAN"], codes
+    assert data["rows"][0]["label"] == "hot"
+    assert data["missing"] == ["USA_XXX"]
+
+
+def test_dyad_status_bulk_defaults_to_latest_as_of(
+        client: TestClient) -> None:
+    resp = client.get(
+        "/dyad-status", params={"dyads": "USA_IRN"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["as_of"] == "2026-09-30"
+    assert data["rows"][0]["as_of"] == "2026-09-30"
+
+
+def test_dyad_status_bulk_malformed_and_missing_params(
+        client: TestClient) -> None:
+    resp = client.get(
+        "/dyad-status", params={"dyads": "USAIRN"})
+    assert resp.status_code == 400
+    resp = client.get("/dyad-status")
+    assert resp.status_code == 400
+    resp = client.get(
+        "/dyad-status", params={"iso1": "USA"})
+    assert resp.status_code == 400
+
+
 def test_dyad_status_latest_when_no_as_of(client: TestClient) -> None:
     resp = client.get("/dyad-status", params={"iso1": "USA", "iso2": "IRN"})
     assert resp.status_code == 200

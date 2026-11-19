@@ -264,8 +264,15 @@ def create_app() -> FastAPI:
 
     @app.get("/dyad-status", response_model=None)
     def dyad_status(
-        iso1: str = Query(..., min_length=1),
-        iso2: str = Query(..., min_length=1),
+        iso1: str | None = Query(default=None, min_length=1),
+        iso2: str | None = Query(default=None, min_length=1),
+        dyads: str | None = Query(
+            default=None,
+            description="Comma-joined ISO1_ISO2 dyads for the "
+                        "bulk form (Scan quick load): one "
+                        "response with every requested dyad's "
+                        "row plus the codes that have none.",
+        ),
         as_of: str | None = Query(default=None),
         api_version: str | None = Query(
             default=None,
@@ -279,6 +286,39 @@ def create_app() -> FastAPI:
         missing = _db_required(provenance, path)
         if missing is not None:
             return missing
+        if dyads:
+            pairs: list[tuple[str, str]] = []
+            for code in dyads.split(","):
+                parts = code.strip().split("_")
+                if len(parts) != 2 or not all(parts):
+                    return _fail(
+                        provenance, warnings, 400, "bad_request",
+                        f"Malformed dyad code in dyads: {code!r} "
+                        "(expected ISO1_ISO2).",
+                    )
+                pairs.append((parts[0], parts[1]))
+            if len(pairs) > 2000:
+                return _fail(
+                    provenance, warnings, 400, "bad_request",
+                    "dyads is capped at 2000 per request.",
+                )
+            try:
+                effective, rows, absent = store.fetch_dyads(
+                    path, pairs, as_of)  # type: ignore[arg-type]
+            except sqlite3.Error as exc:
+                return _fail(
+                    provenance, warnings, 503, "db_error",
+                    f"Could not read rollup DB: {exc}",
+                )
+            return _ok(provenance, warnings, {
+                "as_of": effective, "rows": rows,
+                "missing": absent})
+        if not iso1 or not iso2:
+            return _fail(
+                provenance, warnings, 400, "bad_request",
+                "Provide iso1 and iso2, or dyads for the "
+                "bulk form.",
+            )
         try:
             row = store.fetch_dyad(path, iso1, iso2, as_of)  # type: ignore[arg-type]
         except sqlite3.Error as exc:

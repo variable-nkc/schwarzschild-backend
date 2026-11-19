@@ -437,6 +437,45 @@ def fetch_dyad(
     return _attach_predictive([_row_to_dict(row)])[0]
 
 
+def fetch_dyads(
+    path: Path,
+    pairs: list[tuple[str, str]],
+    as_of: str | None,
+) -> tuple[str | None, list[dict], list[str]]:
+    """Bulk dyad-status (Scan quick load, Dan, 2026-11-19):
+    the same full rollup rows fetch_dyad returns, for many
+    dyads at one as-of, in ONE query — the per-dyad HTTP
+    loop it replaces cost a request per dyad. Returns
+    (effective_as_of, rows, missing): rows in the order
+    the dyads were requested, missing the 'ISO1_ISO2'
+    codes with no row at the effective as-of (the bulk
+    form of fetch_dyad's None, so a caller loses no
+    information by batching). With no as_of, the rollup's
+    latest as-of applies to every dyad (the watchlist /
+    census convention, not fetch_dyad's per-dyad latest).
+    """
+    effective = as_of or latest_as_of(path)
+    if effective is None or not pairs:
+        return effective, [], [f"{a}_{b}" for a, b in pairs]
+    wanted = [f"{a}_{b}" for a, b in pairs]
+    with _connect(path) as conn:
+        where = " OR ".join(
+            "(iso1 = ? AND iso2 = ?)" for _ in pairs)
+        params: list = [effective]
+        for a, b in pairs:
+            params += [a, b]
+        rows = conn.execute(
+            "SELECT * FROM dyad_status_rollup "
+            f"WHERE as_of = ? AND ({where})",
+            params,
+        ).fetchall()
+    by_code = {
+        f"{r['iso1']}_{r['iso2']}": _row_to_dict(r) for r in rows}
+    ordered = [by_code[c] for c in wanted if c in by_code]
+    missing = [c for c in wanted if c not in by_code]
+    return effective, _attach_predictive(ordered), missing
+
+
 def latest_as_of(path: Path) -> str | None:
     """Return the latest as_of in the rollup, or None when empty."""
     with _connect(path) as conn:
