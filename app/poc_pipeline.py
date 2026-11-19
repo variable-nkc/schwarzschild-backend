@@ -1296,6 +1296,20 @@ def record_extent(conn: sqlite3.Connection, iso1: str, iso2: str) -> dict:
     return {"first": first, "last": last, "n_records": int(n or 0)}
 
 
+def frame_extent(conn: sqlite3.Connection) -> dict:
+    """The whole sidecar's record extent: {first, last,
+    n_records} across every dyad (dates None when the table
+    is empty). The frontend seeds its default as-of from
+    `last` (Dan, 2026-11-19: the default as-of is the most
+    recent date available in the sidecar, not a hardcoded
+    snapshot date), so a rebuilt sidecar moves the demo's
+    default with it."""
+    first, last, n = conn.execute(
+        "SELECT MIN(obs_date), MAX(obs_date), COUNT(*) FROM dda",
+    ).fetchone()
+    return {"first": first, "last": last, "n_records": int(n or 0)}
+
+
 def load_daily_volume(conn: sqlite3.Connection, iso1: str, iso2: str,
                       start: str, end: str) -> np.ndarray:
     start_ord = int(np.datetime64(start, "D").astype(np.int64))

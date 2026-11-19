@@ -1599,6 +1599,41 @@ def create_app() -> FastAPI:
         data = {"dyad": f"{iso1}_{iso2}", **data}
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/frame-extent", response_model=None)
+    async def frame_extent_endpoint(
+        api_version: str | None = Query(default=None),
+    ) -> JSONResponse | dict:
+        # The whole DDA sidecar's record extent (2026-11-19):
+        # the frontend seeds its default as-of from `last`
+        # (Dan: the default as-of is the most recent date
+        # available in the sidecar), replacing the hardcoded
+        # snapshot date. Same gating/missing-sidecar handling
+        # as /dev/poc-extent.
+        from . import poc_pipeline
+
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        if dda is None or simplexes_p is None:
+            return _lc_missing(
+                provenance,
+                "FRAME EXTENT — no usable DDA sidecar: set "
+                "DDA_SQLITE and DDA_SIMPLEXES_JSON.",
+            )
+        try:
+            conn = lc_store.connect(dda)
+            try:
+                data = poc_pipeline.frame_extent(conn)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     return app
 
 

@@ -212,6 +212,20 @@ def test_poc_extent_unknown_dyad(poc_env: TestClient) -> None:
     assert data["n_records"] == 0
 
 
+def test_frame_extent(poc_env: TestClient) -> None:
+    """The whole sidecar's extent (2026-11-19): every fixture
+    dyad shares the same 400-day window, so the frame equals
+    it; the record count spans all three dyads."""
+    r = poc_env.get("/dev/frame-extent")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["first"] == START.isoformat()
+    assert data["last"] == (START + timedelta(days=399)).isoformat()
+    dyad_rows = 400 * 3 + sum(
+        1 for i in range(400) if i % 7 != 0)
+    assert data["n_records"] == dyad_rows + 400 + 400
+
+
 def test_poc_bad_body(poc_env: TestClient) -> None:
     r = poc_env.post("/dev/poc-pipeline", json={"timeframe": {}})
     assert r.status_code == 400
