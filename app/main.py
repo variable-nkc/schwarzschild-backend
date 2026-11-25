@@ -59,6 +59,7 @@ query parameter (the frontend's expected payload contract
 version). See ``app/versioning.py`` for strict vs warn behaviour.
 """
 
+import datetime
 import sqlite3
 
 from fastapi import FastAPI, Query, Request
@@ -1678,6 +1679,8 @@ def create_app() -> FastAPI:
     async def anchors_endpoint(
         iso1: str = Query(...),
         iso2: str = Query(...),
+        start: str | None = Query(default=None),
+        as_of: str | None = Query(default=None),
         api_version: str | None = Query(default=None),
     ) -> JSONResponse | dict:
         # Reference anchors for the R&D forecast spectrum
@@ -1688,13 +1691,28 @@ def create_app() -> FastAPI:
         # mixes) and the rollup (the sufficient stratum).
         # Descriptive references only — how atypical a
         # composition is against a chosen population, never
-        # a forecast uncertainty statement.
+        # a forecast uncertainty statement. Optional start /
+        # as_of bound every referent to a date window, so
+        # the references can describe the analyst's selected
+        # timeframe instead of the full span.
         from . import anchors
 
         provenance, dda, simplexes_p = _lc_dda()
         warnings, error = _version_gate(provenance, api_version)
         if error is not None:
             return error
+        for param, value in (("start", start),
+                             ("as_of", as_of)):
+            if value is not None:
+                try:
+                    datetime.date.fromisoformat(value)
+                except ValueError:
+                    return _fail(
+                        provenance, warnings, 400,
+                        f"bad_{param}",
+                        f"{param} must be an ISO date "
+                        f"(YYYY-MM-DD), got {value!r}.",
+                    )
         _, rollup = _lc_rollup()
         if dda is None or simplexes_p is None or rollup is None:
             return _lc_missing(
@@ -1705,7 +1723,8 @@ def create_app() -> FastAPI:
             )
         try:
             data = anchors.build_payload(
-                dda, rollup, simplexes_p, iso1, iso2)  # type: ignore[arg-type]
+                dda, rollup, simplexes_p, iso1, iso2,  # type: ignore[arg-type]
+                start=start, as_of=as_of)
         except (sqlite3.Error, OSError) as exc:
             return _fail(
                 provenance, warnings, 503, "db_error",

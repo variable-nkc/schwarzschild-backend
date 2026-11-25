@@ -207,3 +207,183 @@ def test_anchors_repeatable(anchors_env: TestClient) -> None:
     b = anchors_env.get("/dev/anchors",
                         params={"iso1": "AAA", "iso2": "BBB"})
     assert a.json() == b.json()
+
+
+# --- as_of restriction (Dan, 2026-11-25) -------------------
+# A second fixture whose focal dyad changes both mix and
+# volume halfway through, so a date restriction has visible
+# consequences for the trait, the stratum and the volume.
+
+START2 = date(2025, 6, 1)
+DAYS2 = 40
+
+
+def _asof_env(tmp_path: Path,
+              monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    dda = tmp_path / "dda2.sqlite"
+    con = sqlite3.connect(dda)
+    con.execute(
+        "CREATE TABLE dda (id INTEGER, iso1 TEXT, iso2 TEXT,"
+        " obs_date DATE, cameo_code TEXT, obs_count INTEGER)")
+    rows = []
+    rid = 1
+    for i in range(DAYS2):
+        day = (START2 + timedelta(days=i)).isoformat()
+        spec = [("010", 10)] if i < 20 else [("190", 100)]
+        for code, n in spec:
+            rows.append((rid, "EEE", "FFF", day, code, n))
+            rid += 1
+        rows.append((rid, "GGG", "HHH", day, "020", 10))
+        rid += 1
+    con.executemany("INSERT INTO dda VALUES (?, ?, ?, ?, ?, ?)",
+                    rows)
+    con.commit()
+    con.close()
+
+    rollup = tmp_path / "rollup2.sqlite"
+    con = sqlite3.connect(rollup)
+    con.execute(
+        "CREATE TABLE dyad_status_rollup (iso1 TEXT, iso2 TEXT,"
+        " as_of TEXT, label TEXT, build_id TEXT, vintage TEXT,"
+        " computed_at TEXT)")
+    rows = []
+    for iso1, iso2 in (("EEE", "FFF"), ("GGG", "HHH")):
+        for k in range(12):
+            as_of = (START2 + timedelta(days=7 * k)).isoformat()
+            rows.append((iso1, iso2, as_of, "steady", "b1",
+                         "20250930", "2025-01-01T00:00:00"))
+    con.executemany("INSERT INTO dyad_status_rollup VALUES"
+                    " (?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
+    tokens = tmp_path / "cameo_tokens.json"
+    tokens.write_text(json.dumps(TOKENS), encoding="utf-8")
+    monkeypatch.setenv("DDA_SQLITE", str(dda))
+    monkeypatch.setenv("DDA_SIMPLEXES_JSON", str(tokens))
+    monkeypatch.setenv("ROLLUP_SQLITE", str(rollup))
+    monkeypatch.setenv("API_VERSION_MODE", "strict")
+    return TestClient(create_app())
+
+
+@pytest.fixture()
+def asof_env(tmp_path: Path,
+             monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    return _asof_env(tmp_path, monkeypatch)
+
+
+def _pure(code: str) -> list:
+    """The composition of a single code, diagnostic rules."""
+    t = next(t for t in TOKENS if t["code"] == code)
+    v = np.array([t[f"p{i}"] for i in range(1, 6)], float)
+    v = np.where(v == 0, 5e-3, v)
+    return list(v / v.sum())
+
+
+def test_anchors_asof_restricts(asof_env: TestClient) -> None:
+    cut = (START2 + timedelta(days=19)).isoformat()
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "as_of": cut})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["as_of"] == cut
+    assert data["span"] == {"first": START2.isoformat(),
+                            "last": cut}
+    own = data["references"]["own_trait"]
+    # only the first half exists at the cut: pure code 010
+    assert own["shares"] == pytest.approx(_pure("010"),
+                                          abs=1e-9)
+    assert own["n_days"] == 20
+    assert own["n_reports"] == 200
+    assert data["volume_used"] == 10
+    # unrestricted, the same dyad is a different quantity:
+    # both halves, and the trailing window's median volume
+    # straddles the volume change (20 days at 10, 20 at 100)
+    r = asof_env.get("/dev/anchors",
+                     params={"iso1": "EEE", "iso2": "FFF"})
+    data = r.json()["data"]
+    assert data["as_of"] is None
+    assert data["volume_used"] == 55
+    own = data["references"]["own_trait"]
+    assert own["n_reports"] == 2200
+    assert own["shares"] != pytest.approx(_pure("010"),
+                                          abs=1e-9)
+
+
+def test_anchors_asof_stratum_window(
+        asof_env: TestClient) -> None:
+    # 6 rollup as-ofs on or before day 35 < the 10 minimum:
+    # the stratum is empty and the population references
+    # serve nulls, while the dyad's own trait still works.
+    cut = (START2 + timedelta(days=35)).isoformat()
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "as_of": cut})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["stratum"]["n_dyads"] == 0
+    refs = data["references"]
+    for name in ("population_mix", "typical_dyad",
+                 "random_dyad_day"):
+        assert refs[name]["shares"] is None, name
+        assert refs[name]["distance_quantiles"] is None, name
+    assert refs["own_trait"]["shares"] is not None
+    # 11 as-ofs on or before day 70: the stratum exists.
+    cut = (START2 + timedelta(days=70)).isoformat()
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "as_of": cut})
+    data = r.json()["data"]
+    assert data["stratum"]["n_dyads"] == 2
+    assert data["references"]["population_mix"][
+        "shares"] is not None
+
+
+def test_anchors_bad_asof(asof_env: TestClient) -> None:
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "as_of": "June 20 2025"})
+    assert r.status_code == 400
+    assert "bad_as_of" in r.text
+
+
+def test_anchors_window(asof_env: TestClient) -> None:
+    # The full window over the second half: only code 190
+    # at volume 100 exists for the focal dyad there.
+    start = (START2 + timedelta(days=20)).isoformat()
+    end = (START2 + timedelta(days=39)).isoformat()
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF",
+        "start": start, "as_of": end})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["start"] == start
+    assert data["as_of"] == end
+    assert data["span"] == {"first": start, "last": end}
+    own = data["references"]["own_trait"]
+    assert own["shares"] == pytest.approx(_pure("190"),
+                                          abs=1e-9)
+    assert own["n_days"] == 20
+    assert own["n_reports"] == 2000
+    assert data["volume_used"] == 100
+    # start alone also windows the stratum count: as-ofs
+    # on/after day 20 number 9 (< 10), so the stratum is
+    # empty even though the dyad's own trait computes...
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "start": start})
+    data = r.json()["data"]
+    assert data["stratum"]["n_dyads"] == 0
+    assert data["references"]["population_mix"][
+        "shares"] is None
+    assert data["references"]["own_trait"][
+        "shares"] == pytest.approx(_pure("190"), abs=1e-9)
+    # ...while a start at day 14 leaves exactly 10 as-ofs
+    # in range and the stratum exists.
+    start14 = (START2 + timedelta(days=14)).isoformat()
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "start": start14})
+    assert r.json()["data"]["stratum"]["n_dyads"] == 2
+
+
+def test_anchors_bad_start(asof_env: TestClient) -> None:
+    r = asof_env.get("/dev/anchors", params={
+        "iso1": "EEE", "iso2": "FFF", "start": "last June"})
+    assert r.status_code == 400
+    assert "bad_start" in r.text

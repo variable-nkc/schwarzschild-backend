@@ -19,7 +19,9 @@ verified against its published numbers on the same data:
   Aitchison mean of its codes: clr = (code shares) @ clr(S).
   Unmapped codes are excluded from emission, as everywhere.
 - Sufficient stratum: rollup label != 'insufficient' on
-  >= 10 as-ofs (a frozen span-level classification).
+  >= 10 as-ofs. Unrestricted, that is a span-level
+  classification; with `as_of` set, only as-ofs on or
+  before it count.
 - population_mix ("typical report"): event-weighted pooled
   composition over sufficient dyads' records. Its distance
   yardstick is simulated: days of `volume_used` reports
@@ -47,12 +49,28 @@ Distances are Aitchison (Euclidean in clr; identical to
 the ILR norm). Distance quantiles are returned on a fixed
 probability grid; the caller interpolates a percentile.
 
+`start` / `as_of` (optional, Dan, 2026-11-25): restrict
+every referent to a date window — the DDA records, the
+stratum's as-ofs, the focal dyad's days and its
+trailing-volume window — so the references describe the
+same window the analyst is working in (the R&D page
+passes its timeframe start and end) instead of the full
+span. Either bound may be omitted. The unrestricted
+payload is the diagnostic's full-span quantity; a
+windowed one is a different quantity, and the payload
+echoes both bounds so the caller can say which it is
+showing. A narrow window can leave the stratum empty
+(fewer than 10 as-ofs inside it); the population
+references then serve null shares while own_trait still
+computes.
+
 These are descriptive references, not adopted methodology:
 they say how atypical a composition is against a chosen
 population, never how uncertain a forecast is. Population
 structures are cached per (dda, rollup, simplexes) file
-identity; the volume-dependent simulations re-run per
-request with a fixed seed, so repeat calls agree.
+identity and as_of; the volume-dependent simulations
+re-run per request with a fixed seed, so repeat calls
+agree.
 """
 
 from __future__ import annotations
@@ -100,11 +118,30 @@ def _quantiles(values: np.ndarray) -> dict:
     return {"probs": QPROBS, "values": [float(v) for v in q]}
 
 
+def _window_where(column: str, start: str | None,
+                  as_of: str | None) -> tuple[str, tuple]:
+    """A WHERE fragment (with leading space, or empty)
+    bounding `column` to [start, as_of], either omittable."""
+    clauses, params = [], []
+    if start is not None:
+        clauses.append(f"{column} >= ?")
+        params.append(start)
+    if as_of is not None:
+        clauses.append(f"{column} <= ?")
+        params.append(as_of)
+    if not clauses:
+        return "", ()
+    return " WHERE " + " AND ".join(clauses), tuple(params)
+
+
 def _population(dda_path: Path, rollup_path: Path,
-                simplexes_path: Path) -> dict:
+                simplexes_path: Path,
+                start: str | None = None,
+                as_of: str | None = None) -> dict:
     key = (str(dda_path), dda_path.stat().st_mtime_ns,
            str(rollup_path), rollup_path.stat().st_mtime_ns,
-           str(simplexes_path), simplexes_path.stat().st_mtime_ns)
+           str(simplexes_path), simplexes_path.stat().st_mtime_ns,
+           start, as_of)
     if key in _CACHE:
         return _CACHE[key]
 
@@ -113,26 +150,39 @@ def _population(dda_path: Path, rollup_path: Path,
     codes, S_clr = _crosswalk_arrays(crosswalk)
     code_idx = {c: i for i, c in enumerate(codes)}
 
+    suff_clauses = ["label != 'insufficient'"]
+    suff_params: list = []
+    if start is not None:
+        suff_clauses.append("as_of >= ?")
+        suff_params.append(start)
+    if as_of is not None:
+        suff_clauses.append("as_of <= ?")
+        suff_params.append(as_of)
     rcon = sqlite3.connect(f"file:{rollup_path}?mode=ro", uri=True)
     try:
         suff = {
             f"{r[0]}_{r[1]}"
             for r in rcon.execute(
                 "SELECT iso1, iso2 FROM dyad_status_rollup "
-                "WHERE label != 'insufficient' "
-                "GROUP BY iso1, iso2 HAVING COUNT(*) >= ?",
-                (SUFF_MIN_ASOFS,))
+                "WHERE " + " AND ".join(suff_clauses) +
+                " GROUP BY iso1, iso2 HAVING COUNT(*) >= ?",
+                (*suff_params, SUFF_MIN_ASOFS))
         }
     finally:
         rcon.close()
 
+    dda_where, dda_params = _window_where("obs_date", start,
+                                          as_of)
     dcon = sqlite3.connect(f"file:{dda_path}?mode=ro", uri=True)
     try:
         first, last = dcon.execute(
-            "SELECT MIN(obs_date), MAX(obs_date) FROM dda").fetchone()
+            "SELECT MIN(obs_date), MAX(obs_date) FROM dda"
+            + dda_where, dda_params).fetchone()
         rows = dcon.execute(
             "SELECT iso1, iso2, cameo_code, SUM(obs_count) "
-            "FROM dda GROUP BY iso1, iso2, cameo_code").fetchall()
+            "FROM dda" + dda_where +
+            " GROUP BY iso1, iso2, cameo_code",
+            dda_params).fetchall()
     finally:
         dcon.close()
 
@@ -165,13 +215,26 @@ def _population(dda_path: Path, rollup_path: Path,
 
     is_suff = np.array([nm in suff for nm in dyad_names])
     suff_idx = np.where(is_suff)[0]
-    # event-weighted pooled mix over sufficient dyads' records
-    w_suff = M[suff_idx].sum(axis=0)
-    w_suff = w_suff / w_suff.sum()
-    b_clr = w_suff @ S_clr
-    centre_clr = mu_clr[suff_idx].mean(axis=0)
-    solid = suff_idx[N[suff_idx] >= SOLID_MIN_REPORTS]
-    trait_dist = np.linalg.norm(mu_clr[solid] - centre_clr, axis=1)
+    if len(suff_idx):
+        # event-weighted pooled mix over sufficient dyads'
+        # records
+        w_suff = M[suff_idx].sum(axis=0)
+        w_suff = w_suff / w_suff.sum()
+        b_clr = w_suff @ S_clr
+        centre_clr = mu_clr[suff_idx].mean(axis=0)
+        solid = suff_idx[N[suff_idx] >= SOLID_MIN_REPORTS]
+        trait_quantiles = None
+        if len(solid):
+            trait_dist = np.linalg.norm(
+                mu_clr[solid] - centre_clr, axis=1)
+            trait_quantiles = _quantiles(trait_dist)
+    else:
+        # Empty stratum (an early as_of can leave fewer
+        # than SUFF_MIN_ASOFS as-ofs in existence): the
+        # population references serve nulls downstream.
+        w_suff = b_clr = centre_clr = None
+        solid = suff_idx
+        trait_quantiles = None
 
     pop = {
         "codes": codes, "code_idx": code_idx, "S_clr": S_clr,
@@ -179,9 +242,10 @@ def _population(dda_path: Path, rollup_path: Path,
         "is_suff": is_suff, "suff_idx": suff_idx,
         "Wn_suff": Wn[suff_idx], "w_suff": w_suff,
         "b_clr": b_clr, "centre_clr": centre_clr,
-        "trait_quantiles": _quantiles(trait_dist),
+        "trait_quantiles": trait_quantiles,
         "n_suff": int(len(suff_idx)), "n_solid": int(len(solid)),
         "span": {"first": first, "last": last},
+        "start": start, "as_of": as_of,
     }
     _CACHE.clear()
     _CACHE[key] = pop
@@ -189,16 +253,27 @@ def _population(dda_path: Path, rollup_path: Path,
 
 
 def _own_days(dda_path: Path, iso1: str, iso2: str,
-              pop: dict) -> tuple[np.ndarray, np.ndarray]:
+              pop: dict,
+              start: str | None = None,
+              as_of: str | None = None) -> tuple[np.ndarray,
+                                                 np.ndarray]:
     """(day_clr, day_volumes) for the focal dyad's active
     days (mapped records only), ordered by date; also the
-    dates, for the trailing-volume window."""
+    dates, for the trailing-volume window. `start` /
+    `as_of` bound the days to the window."""
+    sql = ("SELECT obs_date, cameo_code, obs_count FROM dda "
+           "WHERE iso1 = ? AND iso2 = ?")
+    params: list = [iso1, iso2]
+    if start is not None:
+        sql += " AND obs_date >= ?"
+        params.append(start)
+    if as_of is not None:
+        sql += " AND obs_date <= ?"
+        params.append(as_of)
+    sql += " ORDER BY obs_date"
     dcon = sqlite3.connect(f"file:{dda_path}?mode=ro", uri=True)
     try:
-        rows = dcon.execute(
-            "SELECT obs_date, cameo_code, obs_count FROM dda "
-            "WHERE iso1 = ? AND iso2 = ? ORDER BY obs_date",
-            (iso1, iso2)).fetchall()
+        rows = dcon.execute(sql, params).fetchall()
     finally:
         dcon.close()
     code_idx, S_clr = pop["code_idx"], pop["S_clr"]
@@ -225,10 +300,22 @@ def _own_days(dda_path: Path, iso1: str, iso2: str,
 
 def build_payload(dda_path: Path, rollup_path: Path,
                   simplexes_path: Path, iso1: str,
-                  iso2: str) -> dict:
-    pop = _population(dda_path, rollup_path, simplexes_path)
+                  iso2: str,
+                  start: str | None = None,
+                  as_of: str | None = None) -> dict:
+    pop = _population(dda_path, rollup_path, simplexes_path,
+                      start, as_of)
     dyad = f"{iso1}_{iso2}"
-    dates, day_clr, day_vol = _own_days(dda_path, iso1, iso2, pop)
+    if start and as_of:
+        window_txt = f" in {start} → {as_of}"
+    elif as_of:
+        window_txt = f" on or before {as_of}"
+    elif start:
+        window_txt = f" on or after {start}"
+    else:
+        window_txt = ""
+    dates, day_clr, day_vol = _own_days(
+        dda_path, iso1, iso2, pop, start, as_of)
 
     volume_used = None
     if len(dates):
@@ -243,54 +330,66 @@ def build_payload(dda_path: Path, rollup_path: Path,
     rng = np.random.default_rng(SEED)
     refs: dict = {}
 
-    pop_ref: dict = {"shares": [float(v) for v in
-                                _closure_from_clr(pop["b_clr"])]}
-    if volume_used is not None:
-        counts = rng.multinomial(volume_used, pop["w_suff"],
-                                 size=N_DRAWS)
-        day_clr_sim = (counts / volume_used) @ pop["S_clr"]
-        dist = np.linalg.norm(day_clr_sim - pop["b_clr"], axis=1)
-        pop_ref["distance_quantiles"] = _quantiles(dist)
+    if pop["b_clr"] is None:
+        empty_basis = (
+            "the sufficient stratum is empty" + window_txt
+            + f" — no dyad has >= {SUFF_MIN_ASOFS} "
+              "non-insufficient as-ofs in range")
+        for name in ("population_mix", "typical_dyad",
+                     "random_dyad_day"):
+            refs[name] = {"shares": None,
+                          "distance_quantiles": None,
+                          "basis": empty_basis}
     else:
-        pop_ref["distance_quantiles"] = None
-    pop_ref["basis"] = (
-        "simulated days at the stated volume, drawn iid from "
-        "the pooled sufficient-stratum mix")
-    refs["population_mix"] = pop_ref
+        pop_ref: dict = {"shares": [float(v) for v in
+                                    _closure_from_clr(pop["b_clr"])]}
+        if volume_used is not None:
+            counts = rng.multinomial(volume_used, pop["w_suff"],
+                                     size=N_DRAWS)
+            day_clr_sim = (counts / volume_used) @ pop["S_clr"]
+            dist = np.linalg.norm(day_clr_sim - pop["b_clr"], axis=1)
+            pop_ref["distance_quantiles"] = _quantiles(dist)
+        else:
+            pop_ref["distance_quantiles"] = None
+        pop_ref["basis"] = (
+            "simulated days at the stated volume, drawn iid from "
+            "the pooled sufficient-stratum mix")
+        refs["population_mix"] = pop_ref
 
-    refs["typical_dyad"] = {
-        "shares": [float(v) for v in
-                   _closure_from_clr(pop["centre_clr"])],
-        "distance_quantiles": pop["trait_quantiles"],
-        "basis": ("empirical trait distances of solid "
-                  f"sufficient dyads (>= {SOLID_MIN_REPORTS} "
-                  "reports) from the trait centre"),
-    }
+        refs["typical_dyad"] = {
+            "shares": [float(v) for v in
+                       _closure_from_clr(pop["centre_clr"])],
+            "distance_quantiles": pop["trait_quantiles"],
+            "basis": ("empirical trait distances of solid "
+                      f"sufficient dyads (>= {SOLID_MIN_REPORTS} "
+                      "reports) from the trait centre"),
+        }
 
-    rd_ref: dict = {"shares": refs["typical_dyad"]["shares"]}
-    if volume_used is not None:
-        Wn = pop["Wn_suff"]
-        pick = rng.integers(0, len(Wn), size=N_DRAWS)
-        counts = np.array([rng.multinomial(volume_used, Wn[i])
-                           for i in pick])
-        day_clr_sim = (counts / volume_used) @ pop["S_clr"]
-        dist = np.linalg.norm(day_clr_sim - pop["centre_clr"],
-                              axis=1)
-        rd_ref["distance_quantiles"] = _quantiles(dist)
-    else:
-        rd_ref["distance_quantiles"] = None
-    rd_ref["basis"] = (
-        "simulated: a sufficient dyad drawn uniformly, then "
-        "a day at the stated volume from its own mix; "
-        "distances to the trait centre")
-    refs["random_dyad_day"] = rd_ref
+        rd_ref: dict = {"shares": refs["typical_dyad"]["shares"]}
+        if volume_used is not None:
+            Wn = pop["Wn_suff"]
+            pick = rng.integers(0, len(Wn), size=N_DRAWS)
+            counts = np.array([rng.multinomial(volume_used, Wn[i])
+                               for i in pick])
+            day_clr_sim = (counts / volume_used) @ pop["S_clr"]
+            dist = np.linalg.norm(day_clr_sim - pop["centre_clr"],
+                                  axis=1)
+            rd_ref["distance_quantiles"] = _quantiles(dist)
+        else:
+            rd_ref["distance_quantiles"] = None
+        rd_ref["basis"] = (
+            "simulated: a sufficient dyad drawn uniformly, then "
+            "a day at the stated volume from its own mix; "
+            "distances to the trait centre")
+        refs["random_dyad_day"] = rd_ref
 
     k = pop["dyad_index"].get(dyad)
     if k is None:
         refs["own_trait"] = {
             "shares": None, "distance_quantiles": None,
             "n_days": 0, "n_reports": 0,
-            "basis": "dyad has no mapped records in the DDA",
+            "basis": ("dyad has no mapped records in the DDA"
+                      + window_txt),
         }
     else:
         own_clr = pop["mu_clr"][k]
@@ -311,6 +410,8 @@ def build_payload(dda_path: Path, rollup_path: Path,
 
     return {
         "dyad": dyad,
+        "start": start,
+        "as_of": as_of,
         "span": pop["span"],
         "stratum": {
             "definition": ("rollup label != 'insufficient' on "
