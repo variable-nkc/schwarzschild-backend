@@ -78,7 +78,7 @@ DEFAULTS = {
 }
 
 HYBRID_MODEL = "F2"
-HYBRID_MODELS = ("F0p", "F0m", "F1", "F2")
+HYBRID_MODELS = ("F0p", "F0m", "F1", "F2", "POOL")
 HYBRID_HORIZON = 60
 HYBRID_ORIGINS = [0, 7, 15, 30, 45]
 
@@ -399,9 +399,13 @@ def forecast_multi_origin(
 ) -> dict:
     """One model rung at one horizon with the multi-origin mixture.
 
-    Model is one of HYBRID_MODELS (F0p/F0m/F1/F2). F3 is NOT
+    Model is one of HYBRID_MODELS (F0p/F0m/F1/F2/POOL). F3 is NOT
     offered: it is uniqueness-gated and the workflow serves no
-    per-day uniqueness series to gate on. Returns the PoC leaf
+    per-day uniqueness series to gate on. POOL (Dan, 2026-11-25)
+    is the equal-weight pool of F1 and F2: at each origin the
+    two models' Gaussians are mixed with the same total-variance
+    rule the cross-origin mixture uses, so model disagreement
+    widens the bands; it carries no regime extras. Returns the PoC leaf
     for the horizon: path/lower/upper (K,) simplex summaries,
     origins actually used, per-origin simplex points, and — for
     F2 only — regime_now/p_change/regime_dist from the k=0
@@ -436,6 +440,14 @@ def forecast_multi_origin(
                 raw = f1_trend(Zk, wk, nk, [horizon], p)
             elif model == "F0m":
                 raw = f0_mean(Zk, [horizon], p)
+            elif model == "POOL":
+                r1 = f1_trend(Zk, wk, nk, [horizon], p)[horizon]
+                r2 = f2_regime(Zk, wk, nk, [horizon], p)[horizon]
+                mus = np.array([r1["mu"], r2["mu"]])
+                vrs = np.array([r1["var"], r2["var"]])
+                raw = {horizon: {
+                    "mu": mus.mean(axis=0),
+                    "var": vrs.mean(axis=0) + mus.var(axis=0)}}
             else:
                 raw = f0_persistence(Zk, [horizon], p)
         except ValueError:

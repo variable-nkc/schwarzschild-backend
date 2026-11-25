@@ -345,6 +345,96 @@ def _expand_models(models: list[str]) -> list[str]:
     return out
 
 
+#: Composite forecast models (Dan, 2026-11-25; R&D surface —
+#: POOL is also served by the workflow hybrid engine).
+#: POOL = equal-weight pool of F1 and F2. ANCH05 / ANCHBT =
+#: the trailing-mean anchor (F0m) plus a λ share of the
+#: pooled F1+F2 deviation from it — ANCH05 with λ = 0.5
+#: declared as a judgement, ANCHBT with λ estimated per
+#: dyad and horizon by rolling-origin backtest (research-
+#: grade). A composite's per-origin (mu, var) is the
+#: weighted mixture of its components' Gaussians — the
+#: same total-variance rule as the cross-origin mixture,
+#: so component disagreement widens the bands.
+COMPOSITE_MODELS = ("POOL", "ANCH05", "ANCHBT")
+
+
+def _pool_raw(Zk, wk, nk, horizons, p):
+    """Per-origin raw for POOL: F1 and F2 mixed per horizon
+    with equal weights (mixture mean / total variance)."""
+    r1 = f1_trend(Zk, wk, nk, horizons, p)
+    r2 = f2_regime(Zk, wk, nk, horizons, p)
+    out = {}
+    for h in horizons:
+        mus = np.array([r1[h]["mu"], r2[h]["mu"]])
+        vrs = np.array([r1[h]["var"], r2[h]["var"]])
+        out[h] = {"mu": mus.mean(axis=0),
+                  "var": vrs.mean(axis=0) + mus.var(axis=0)}
+    return out
+
+
+def _anchored_raw(Zk, wk, nk, horizons, p, lam_by_h):
+    """Per-origin raw for the anchored composites: the
+    (1−λ, λ) mixture of the F0m anchor and the F1+F2 pool,
+    per horizon. The mixture mean is exactly anchor +
+    λ·(pool − anchor) — the shrinkage form."""
+    ra = f0_mean(Zk, horizons, p)
+    rp = _pool_raw(Zk, wk, nk, horizons, p)
+    out = {}
+    for h in horizons:
+        lam = lam_by_h[h]
+        mu = (1.0 - lam) * ra[h]["mu"] + lam * rp[h]["mu"]
+        var = ((1.0 - lam) * ra[h]["var"] + lam * rp[h]["var"]
+               + lam * (1.0 - lam)
+               * (rp[h]["mu"] - ra[h]["mu"]) ** 2)
+        out[h] = {"mu": mu, "var": var}
+    return out
+
+
+def _estimate_lambda(Z, w, n_eff, h, p):
+    """Backtest-estimated anchoring weight for one horizon
+    (ANCHBT; research-grade first cut, Dan, 2026-11-25).
+
+    Rolling origins inside the dyad's own history: at
+    truncation k = h, h+15, … (≤ h+180, at most 13 origins),
+    fit F0m and the F1+F2 pool on Z[:T−k] and score the
+    anchored point anchor + λ·(pool − anchor) against the
+    realized Z[T−k−1+h] by ILR squared error, over a λ grid
+    of 0.00–1.00 in 0.05 steps. λ̂ minimises the total
+    score; ties resolve to the smaller λ (np.argmin takes
+    the first minimum — prefer the anchor). Windows overlap
+    when h > 15, so origin scores are correlated; that is
+    accepted for a first cut and stated here. Fewer than 3
+    usable origins → (0.5, n, False): the declared-judgement
+    value, flagged as not estimated."""
+    T = len(Z)
+    grid = [i / 20 for i in range(21)]
+    totals = np.zeros(len(grid))
+    n = 0
+    k = h
+    while k <= h + 180 and n < 13:
+        idx = T - k - 1 + h
+        if idx >= T:
+            k += 15
+            continue
+        Zk, wk, nk = Z[:T - k], w[:T - k], n_eff[:T - k]
+        try:
+            ra = f0_mean(Zk, [h], p)[h]
+            rp = _pool_raw(Zk, wk, nk, [h], p)[h]
+        except ValueError:
+            break  # less history only gets worse
+        base = ra["mu"] - Z[idx]
+        dev = rp["mu"] - ra["mu"]
+        for i, lam in enumerate(grid):
+            e = base + lam * dev
+            totals[i] += float(e @ e)
+        n += 1
+        k += 15
+    if n < 3:
+        return 0.5, n, False
+    return grid[int(np.argmin(totals))], n, True
+
+
 def _simplex_quantiles(mu: np.ndarray, var: np.ndarray, p: dict):
     rng = np.random.default_rng(p["seed"])
     sd = np.sqrt(np.maximum(var, 1e-12))
@@ -375,6 +465,19 @@ def forecast_from_arrays(
     result = {}
     for m in _expand_models(models):
         mh = {}
+        lam_by_h: dict[int, float] | None = None
+        lam_meta: dict[int, dict] = {}
+        if m == "ANCH05":
+            lam_by_h = {h: 0.5 for h in horizons}
+        elif m == "ANCHBT":
+            lam_by_h = {}
+            for h in horizons:
+                lam, n_ev, est = _estimate_lambda(
+                    Z, w, n_eff, h, p)
+                lam_by_h[h] = lam
+                lam_meta[h] = {"lambda": lam,
+                               "lambda_origins": n_ev,
+                               "lambda_estimated": est}
         per_origin: dict[int, dict] = {}
         for k in origins:
             if len(Z) - k < need:
@@ -398,6 +501,11 @@ def forecast_from_arrays(
                             "F3 requires uniq_daily (enable TF-IDF)")
                     raw = f2_regime(Zk, wk, nk, horizons, p,
                                     uniq_daily=uk)
+                elif m == "POOL":
+                    raw = _pool_raw(Zk, wk, nk, horizons, p)
+                elif m in ("ANCH05", "ANCHBT"):
+                    raw = _anchored_raw(Zk, wk, nk, horizons, p,
+                                        lam_by_h)
                 else:
                     raise ValueError(f"unknown forecast model '{m}'")
             except ValueError:
@@ -429,6 +537,11 @@ def forecast_from_arrays(
             for key in ("p_change", "regime_now", "regime_dist"):
                 if key in per_origin[0][h]:
                     leaf[key] = per_origin[0][h][key]
+            if m == "ANCH05":
+                leaf["lambda"] = 0.5
+                leaf["lambda_estimated"] = False
+            elif m == "ANCHBT":
+                leaf.update(lam_meta[h])
             mh[h] = leaf
         result[m] = mh
     return result
