@@ -1674,6 +1674,45 @@ def create_app() -> FastAPI:
             )
         return _ok(provenance, warnings, data)
 
+    @app.get("/dev/anchors", response_model=None)
+    async def anchors_endpoint(
+        iso1: str = Query(...),
+        iso2: str = Query(...),
+        api_version: str | None = Query(default=None),
+    ) -> JSONResponse | dict:
+        # Reference anchors for the R&D forecast spectrum
+        # (2026-11-25): the simplex-hull diagnostic's
+        # population references (population mix, typical
+        # dyad, random dyad-day) plus the dyad's own trait,
+        # computed by app/anchors from the DDA sidecar (the
+        # mixes) and the rollup (the sufficient stratum).
+        # Descriptive references only — how atypical a
+        # composition is against a chosen population, never
+        # a forecast uncertainty statement.
+        from . import anchors
+
+        provenance, dda, simplexes_p = _lc_dda()
+        warnings, error = _version_gate(provenance, api_version)
+        if error is not None:
+            return error
+        _, rollup = _lc_rollup()
+        if dda is None or simplexes_p is None or rollup is None:
+            return _lc_missing(
+                provenance,
+                "ANCHORS — no usable DDA sidecar or rollup DB: "
+                "set DDA_SQLITE, DDA_SIMPLEXES_JSON and "
+                "ROLLUP_SQLITE.",
+            )
+        try:
+            data = anchors.build_payload(
+                dda, rollup, simplexes_p, iso1, iso2)  # type: ignore[arg-type]
+        except (sqlite3.Error, OSError) as exc:
+            return _fail(
+                provenance, warnings, 503, "db_error",
+                f"Could not read DDA sidecar or rollup DB: {exc}",
+            )
+        return _ok(provenance, warnings, data)
+
     return app
 
 
